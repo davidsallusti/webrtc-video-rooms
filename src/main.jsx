@@ -257,6 +257,9 @@ function CallRoom({ room, access }) {
   const [error, setError] = useState('')
   const [micOn, setMicOn] = useState(true)
   const [cameraOn, setCameraOn] = useState(true)
+  const [hasRemoteStream, setHasRemoteStream] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatDraft, setChatDraft] = useState('')
   const localVideoRef = useRef(null)
   const remoteVideoRef = useRef(null)
   const localStreamRef = useRef(null)
@@ -333,7 +336,10 @@ function CallRoom({ room, access }) {
     localStreamRef.current?.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current))
 
     pc.ontrack = (event) => {
-      if (remoteVideoRef.current && event.streams[0]) remoteVideoRef.current.srcObject = event.streams[0]
+      if (remoteVideoRef.current && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0]
+        setHasRemoteStream(true)
+      }
     }
     pc.onconnectionstatechange = () => {
       setConnectionState(pc.connectionState)
@@ -384,8 +390,22 @@ function CallRoom({ room, access }) {
       if (message.type === 'peer-left') {
         remoteParticipantRef.current = null
         pendingCandidatesRef.current = []
+        setHasRemoteStream(false)
         setConnectionState('waiting')
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+        return
+      }
+      if (message.type === 'chat-message') {
+        setChatMessages((current) => [
+          ...current,
+          {
+            id: message.id || `${Date.now()}-${current.length}`,
+            text: message.text,
+            sentAt: message.sentAt || new Date().toISOString(),
+            author: message.fromRole === 'host' ? 'Host' : 'Guest',
+            self: false,
+          },
+        ])
         return
       }
       if (message.type === 'offer' || message.type === 'answer') {
@@ -448,6 +468,29 @@ function CallRoom({ room, access }) {
     window.location.reload()
   }
 
+  const sendChat = (event) => {
+    event.preventDefault()
+    const text = chatDraft.trim()
+    if (!text || wsRef.current?.readyState !== WebSocket.OPEN) return
+    const message = {
+      id: `${access.participantId}-${Date.now()}`,
+      type: 'chat-message',
+      text,
+    }
+    wsRef.current.send(JSON.stringify(message))
+    setChatMessages((current) => [
+      ...current,
+      {
+        id: message.id,
+        text,
+        sentAt: new Date().toISOString(),
+        author: 'You',
+        self: true,
+      },
+    ])
+    setChatDraft('')
+  }
+
   return (
     <section className="call-shell">
       <div className="call-header panel">
@@ -473,9 +516,36 @@ function CallRoom({ room, access }) {
         </div>
       ) : (
         <>
-          <div className="video-grid">
-            <VideoTile label="Remote participant" refObj={remoteVideoRef} muted={false} />
-            <VideoTile label="You" refObj={localVideoRef} muted />
+          <div className="room-grid">
+            <section className="stage-panel">
+              <VideoTile
+                label="Remote participant"
+                refObj={remoteVideoRef}
+                muted={false}
+                variant="main"
+                empty={!hasRemoteStream}
+                emptyTitle={connectionState === 'waiting' ? 'Waiting for participant' : 'Connecting remote video'}
+                emptyText={connectionState === 'waiting'
+                  ? 'Your camera is on in the self-preview. The guest appears here after joining with the room link and password.'
+                  : 'Keep this room open while the peer connection finishes.'}
+              />
+            </section>
+            <aside className="room-rail">
+              <VideoTile
+                label="You"
+                refObj={localVideoRef}
+                muted
+                variant="self"
+                cameraOn={cameraOn}
+              />
+              <ChatPanel
+                messages={chatMessages}
+                draft={chatDraft}
+                onDraft={setChatDraft}
+                onSubmit={sendChat}
+                disabled={wsRef.current?.readyState !== WebSocket.OPEN}
+              />
+            </aside>
           </div>
           {error ? <div className="error-banner" role="alert">{error}</div> : null}
           <div className="controls panel">
@@ -499,10 +569,51 @@ function connectionCopy(state) {
   return state || 'Preparing'
 }
 
-function VideoTile({ label, refObj, muted }) {
+function ChatPanel({ messages, draft, onDraft, onSubmit, disabled }) {
   return (
-    <article className="video-tile">
+    <section className="chat-panel panel" aria-label="In-room chat">
+      <div className="chat-header">
+        <div>
+          <p className="eyebrow">Room chat</p>
+          <strong>Messages</strong>
+        </div>
+        <span>{messages.length}</span>
+      </div>
+      <div className="chat-log" role="log" aria-live="polite">
+        {messages.length ? messages.map((message) => (
+          <article className={`chat-message${message.self ? ' self' : ''}`} key={message.id}>
+            <span>{message.author}</span>
+            <p>{message.text}</p>
+          </article>
+        )) : (
+          <p className="chat-empty">Chat appears here after someone sends a message during the room.</p>
+        )}
+      </div>
+      <form className="chat-form" onSubmit={onSubmit}>
+        <input
+          value={draft}
+          onChange={(event) => onDraft(event.target.value)}
+          placeholder="Message the room"
+          maxLength="500"
+          aria-label="Message the room"
+        />
+        <button type="submit" disabled={disabled || !draft.trim()}>Send</button>
+      </form>
+    </section>
+  )
+}
+
+function VideoTile({ label, refObj, muted, variant = '', empty, emptyTitle, emptyText, cameraOn = true }) {
+  return (
+    <article className={`video-tile ${variant ? `video-${variant}` : ''}${empty ? ' is-empty' : ''}`}>
       <video ref={refObj} autoPlay playsInline muted={muted} />
+      {empty ? (
+        <div className="video-placeholder">
+          <strong>{emptyTitle}</strong>
+          <p>{emptyText}</p>
+        </div>
+      ) : null}
+      {!cameraOn ? <em className="camera-off">Camera off</em> : null}
       <span>{label}</span>
     </article>
   )

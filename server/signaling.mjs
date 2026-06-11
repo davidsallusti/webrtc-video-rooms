@@ -186,17 +186,30 @@ export function attachSignaling(server) {
         return
       }
 
-      if (!['ready', 'offer', 'answer', 'ice-candidate'].includes(message.type)) {
+      if (!['ready', 'offer', 'answer', 'ice-candidate', 'chat-message'].includes(message.type)) {
         safeSend(ws, errorPayload('unsupported_message', 'Unsupported signaling message.'))
         return
       }
 
       const roomPeers = peersFor(peer.roomId)
+      const outbound = message.type === 'chat-message'
+        ? {
+            type: 'chat-message',
+            id: message.id,
+            text: String(message.text || '').trim().slice(0, 500),
+            sentAt: new Date().toISOString(),
+          }
+        : message
+      if (message.type === 'chat-message' && !outbound.text) {
+        safeSend(ws, errorPayload('empty_message', 'Chat message cannot be empty.'))
+        return
+      }
       for (const target of roomPeers.values()) {
         if (target.participantId === peer.participantId) continue
         safeSend(target.ws, {
-          ...message,
+          ...outbound,
           from: peer.participantId,
+          fromRole: peer.role,
         })
       }
     })

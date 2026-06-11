@@ -301,6 +301,13 @@ function CallRoom({ room, access }) {
   }, [])
 
   useEffect(() => {
+    if (permissionState !== 'granted' || !localVideoRef.current || !localStreamRef.current) return
+    if (localVideoRef.current.srcObject !== localStreamRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current
+    }
+  }, [permissionState])
+
+  useEffect(() => {
     if (permissionState !== 'granted') return undefined
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
     const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws'

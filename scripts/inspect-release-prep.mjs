@@ -39,6 +39,10 @@ const forbiddenSurfacePatterns = [
 
 const textExtensions = new Set(['.js', '.mjs', '.jsx', '.json', '.md', '.html', '.example'])
 const scanRoots = ['package.json', 'README.md', 'src/sdk', 'src/embed-sdk.js', 'examples/embed', 'docs/release']
+const denialDocs = new Set([
+  'docs/release/local-prep-checklist.md',
+  'docs/release/hosted-review-prep-checklist.md',
+])
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8')
@@ -53,6 +57,14 @@ function listFiles(entry) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
+}
+
+function sectionBetween(source, startHeading, endHeading) {
+  const start = source.indexOf(startHeading)
+  assert(start >= 0, `missing section: ${startHeading}`)
+  const afterStart = start + startHeading.length
+  const end = source.indexOf(endHeading, afterStart)
+  return source.slice(afterStart, end >= 0 ? end : undefined)
 }
 
 export function runReleasePrepInspection() {
@@ -75,7 +87,7 @@ export function runReleasePrepInspection() {
     .filter((file) => textExtensions.has(path.extname(file)) || file.endsWith('.env.example'))
 
   for (const file of files) {
-    if (file === 'docs/release/local-prep-checklist.md') continue
+    if (denialDocs.has(file)) continue
     const source = read(file)
     for (const pattern of forbiddenSurfacePatterns) {
       assert(!pattern.test(source), `forbidden release surface matched in ${file}: ${pattern}`)
@@ -86,10 +98,37 @@ export function runReleasePrepInspection() {
   assert(iframeExample.includes('URLSearchParams'), 'iframe example must use configurable local parameters.')
   assert(!/https:\/\/(?!example\.invalid)/i.test(iframeExample), 'iframe example must not hard-code production HTTPS endpoints.')
 
+  const readme = read('README.md')
+  const requiredHostedEnv = sectionBetween(readme, 'Required environment variables for no-spend review:', 'Optional hardening/config variables:')
+  const optionalHostedEnv = sectionBetween(readme, 'Optional hardening/config variables:', 'Public review limitations:')
+  assert(requiredHostedEnv.includes('WEBRTC_PUBLIC_ORIGIN='), 'README must classify WEBRTC_PUBLIC_ORIGIN as required for hosted review.')
+  assert(!optionalHostedEnv.includes('WEBRTC_PUBLIC_ORIGIN='), 'README must not classify WEBRTC_PUBLIC_ORIGIN as optional for hosted review.')
+
+  const hostedChecklist = read('docs/release/hosted-review-prep-checklist.md')
+  for (const phrase of [
+    'does not deploy',
+    'one no-spend Node web service',
+    'WEBRTC_PUBLIC_ORIGIN',
+    'frame-ancestors',
+    'rollback',
+    'cleanup',
+    'separate checkpoints',
+    'Actual deploy',
+    'production credentials',
+    'object storage',
+    'TURN/SFU',
+    'real callbacks',
+    'real media',
+  ]) {
+    assert(hostedChecklist.toLowerCase().includes(phrase.toLowerCase()), `hosted checklist missing required release boundary: ${phrase}`)
+  }
+
   return {
     privatePackage: true,
     browserExports: browserExportFiles,
     scannedFiles: files.length,
+    hostedReviewChecklist: true,
+    hostedPublicOriginRequired: true,
   }
 }
 

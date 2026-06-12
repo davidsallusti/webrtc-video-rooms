@@ -34,7 +34,7 @@ This checklist is local prep only. It does not approve npm publication, hosted e
 
 ## Future Hosted Review Checklist
 
-These are planning notes only. Do not execute them in this local prep slice.
+These are planning notes only. Do not execute them in this local prep slice. The active hosted-review preparation checklist is `docs/release/hosted-review-prep-checklist.md`; it is still prep-only and does not approve deploy or public URL creation.
 
 - Confirm no-spend or paid-resource posture with David.
 - Confirm hosting provider, service shape, rollback plan, and cleanup plan with Rex.
@@ -42,6 +42,7 @@ These are planning notes only. Do not execute them in this local prep slice.
 - Confirm production admin bootstrap procedure, secret ownership, and redaction rules.
 - Confirm persistence plan. Ephemeral SQLite is only for disposable review; durable data requires a separate persistence/migration gate.
 - Confirm whether TURN/SFU, object storage, real callbacks, real recording/media, integration embed issuance, or public SDK distribution are still out of scope or separately approved.
+- Preserve rollback and cleanup notes for a future no-spend, one-service review baseline, including explicit ephemeral SQLite reset expectations.
 
 ## Future Production Data Gates
 

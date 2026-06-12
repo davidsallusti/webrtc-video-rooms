@@ -77,12 +77,13 @@ The release inspection script verifies that the package is still private, the br
 Release checklist:
 
 - `docs/release/local-prep-checklist.md`
+- `docs/release/hosted-review-prep-checklist.md`
 
-This checklist is planning documentation only. It does not approve npm publication, hosted examples, deploy/release, DNS/TLS, production credentials, vendors, paid resources, production persistence, object storage, TURN/SFU, real callbacks, real recording/media, broader public embed rollout, integration embed issuance, global security-header relaxation, or permission broadening.
+These checklists are planning documentation only. They do not approve npm publication, hosted examples, deploy/release, DNS/TLS, production credentials, vendors, paid resources, production persistence, object storage, TURN/SFU, real callbacks, real recording/media, broader public embed rollout, integration embed issuance, global security-header relaxation, or permission broadening.
 
 ## Render Preparation
 
-Rex guidance for the first public review is one Render Web Service rooted at `projects/WebRTC`.
+Rex guidance for the first public review is one no-spend Render Web Service rooted at `projects/WebRTC`. This section is hosted-review preparation only; Bernard must not create or modify provider resources from this repo without a separate deploy route.
 
 Recommended manual settings:
 
@@ -99,6 +100,7 @@ Required environment variables for no-spend review:
 NODE_VERSION=24.14.1
 NODE_ENV=production
 WEBRTC_DB_PATH=/tmp/webrtc.sqlite
+WEBRTC_PUBLIC_ORIGIN=https://your-render-service.onrender.com
 WEBRTC_ROOM_TTL_HOURS=24
 VITE_WEBRTC_ICE_SERVERS_JSON='[{"urls":"stun:stun.l.google.com:19302"}]'
 ```
@@ -106,7 +108,6 @@ VITE_WEBRTC_ICE_SERVERS_JSON='[{"urls":"stun:stun.l.google.com:19302"}]'
 Optional hardening/config variables:
 
 ```bash
-WEBRTC_PUBLIC_ORIGIN=https://your-render-service.onrender.com
 WEBRTC_TRUST_PROXY=1
 WEBRTC_ROOM_CREATE_LIMIT=12
 WEBRTC_ROOM_CREATE_WINDOW_MS=300000
@@ -135,6 +136,8 @@ WEBRTC_EMBED_SESSION_TTL_MS=600000
 Public review limitations:
 
 - `/tmp/webrtc.sqlite` is ephemeral. Rooms, tokens, and presence can disappear on restart, redeploy, rollback, or free-service spin-down.
+- Rollback for the first no-spend review means redeploying/reverting code and accepting ephemeral SQLite reset. Durable rollback, backup, and restore require a separate persistence checkpoint.
+- Cleanup for any later approved review service must remove the temporary service and environment variables, then verify the public URL no longer serves `/`, `/api/health`, `/embed/*`, `/api/admin/*`, `/api/integrations/*`, or `/ws/signaling`.
 - Direct P2P with public STUN is not guaranteed across restrictive NAT/firewall networks. TURN requires separate David approval for provider choice, credentials, and possible spending.
 - Do not publish, create paid resources, add persistent disks/Postgres, configure TURN, inject secrets, or change DNS without explicit approval.
 - Do not enable real speech-to-text, browser speech APIs, cloud speech APIs, recording bytes, playback/download/export, media file storage, object storage, managed media, external vendors, real external webhook sends, public iframe/SDK distribution, production integration API keys, or production admin credentials without explicit approval and another security review. Local retained text chat, local mock transcripts, local mock recording metadata, and local embed examples remain review-gated before any production rollout or production persistence.

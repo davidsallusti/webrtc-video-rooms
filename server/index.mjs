@@ -4,10 +4,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   createRoom,
+  frameAncestorsForEmbedRoom,
   getPublicRoom,
   validatePasswordAndIssueAccess,
 } from './store.mjs'
-import { activeParticipantCount, attachSignaling } from './signaling.mjs'
+import { createAdminRouter, createParticipantControlRouter } from './admin.mjs'
+import { createEmbedRouter } from './embed.mjs'
+import { createIntegrationRouter } from './integrations.mjs'
+import { activeParticipantCount, attachSignaling, endSignalingRoom } from './signaling.mjs'
 import { createRateLimiter, readLimit } from './rate-limit.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -73,6 +77,7 @@ function validateRequestHost(req, res, next) {
 }
 
 function securityHeaders(req, res, next) {
+  const embedAncestors = embedFrameAncestors(req)
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(), payment=()')
@@ -82,7 +87,7 @@ function securityHeaders(req, res, next) {
     "default-src 'self'",
     "base-uri 'self'",
     "connect-src 'self' ws: wss:",
-    "frame-ancestors 'none'",
+    embedAncestors.length ? `frame-ancestors 'self' ${embedAncestors.join(' ')}` : "frame-ancestors 'none'",
     "img-src 'self' data:",
     "media-src 'self' blob:",
     "object-src 'none'",
@@ -95,14 +100,20 @@ function securityHeaders(req, res, next) {
   next()
 }
 
+function embedFrameAncestors(req) {
+  const match = req.path.match(/^\/embed\/rooms\/([^/?#]+)/)
+  if (!match) return []
+  return frameAncestorsForEmbedRoom(decodeURIComponent(match[1]))
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, mode: 'local-first', transport: 'webrtc-p2p' })
 })
 
 app.post('/api/rooms', asyncRoute(async (req, res) => {
   roomCreateLimiter.check(clientIp(req))
-  const { displayName, password } = req.body || {}
-  const result = createRoom({ displayName, password, origin: originFor(req) })
+  const { displayName, password, metadata } = req.body || {}
+  const result = createRoom({ displayName, password, metadata, origin: originFor(req) })
   res.status(201).json(result)
 }))
 
@@ -121,6 +132,43 @@ app.post('/api/rooms/:roomId/access', asyncRoute(async (req, res) => {
   })
   res.json(result)
 }))
+
+app.use('/api/rooms', createParticipantControlRouter({
+  clientIp,
+  onRoomEnded: endSignalingRoom,
+}))
+
+app.use('/api/embed', createEmbedRouter({
+  clientIp,
+  activeParticipantCount,
+}))
+
+app.use('/api/admin', createAdminRouter({
+  isProduction,
+  clientIp,
+  onRoomEnded: endSignalingRoom,
+}))
+
+app.use('/api/integrations', createIntegrationRouter({
+  clientIp,
+}))
+
+app.get('/embed/rooms/:roomId', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WebRTC Local Embed</title>
+  </head>
+  <body>
+    <main id="root" data-embed-room="${String(_req.params.roomId || '').replace(/"/g, '&quot;')}">
+      <h1>WebRTC local embed</h1>
+      <p>This local iframe surface uses a scoped embed session. No admin or integration credentials are present.</p>
+    </main>
+  </body>
+</html>`)
+})
 
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'not_found', message: 'Not found' })

@@ -51,6 +51,16 @@ export function activeParticipantCount(roomId) {
   return rooms.get(roomId)?.size || 0
 }
 
+export function endSignalingRoom(roomId, payload = {}) {
+  const roomPeers = rooms.get(roomId)
+  if (!roomPeers) return
+  for (const peer of roomPeers.values()) {
+    safeSend(peer.ws, { type: 'room-ended', ...payload })
+    peer.ws.close(4000, 'room_ended')
+  }
+  rooms.delete(roomId)
+}
+
 function socketIp(req) {
   const trustedProxy = process.env.NODE_ENV === 'production' || process.env.WEBRTC_TRUST_PROXY === '1'
   if (trustedProxy) {

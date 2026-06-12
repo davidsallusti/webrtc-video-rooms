@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local WebRTC Embed Example</title>
+  </head>
+  <body>
+    <main>
+      <h1>Local iframe wrapper</h1>
+      <iframe id="webrtc-embed" title="Local WebRTC room" referrerpolicy="no-referrer" allow="camera; microphone" width="420" height="560"></iframe>
+    </main>
+    <script type="module">
+      const params = new URLSearchParams(window.location.search)
+      const origin = params.get('origin') || 'http://127.0.0.1:4321'
+      const roomId = params.get('roomId') || 'replace-with-local-room-id'
+      const parsed = new URL(origin)
+      if (!['localhost', '127.0.0.1'].includes(parsed.hostname)) {
+        throw new Error('This local example only accepts localhost or 127.0.0.1 origins.')
+      }
+      document.querySelector('#webrtc-embed').src = `${parsed.origin}/embed/rooms/${encodeURIComponent(roomId)}`
+    </script>
+  </body>
+</html>

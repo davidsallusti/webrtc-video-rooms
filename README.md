@@ -1,29 +1,46 @@
-# WebRTC Rooms
+# WebRTC Rooms — HirePortal Video Service
 
-Password-protected 1:1 WebRTC room MVP for TASK-0080/TASK-0082.
+Password-protected interview video rooms (TASK-0080/0082/0086/0087), rebuilt in
+TASK-0088 as HirePortal's self-hosted video service: LiveKit media plane,
+candidate/recruiter mapping, invitee allowlists, join windows, real recordings
+(egress → local folder or S3), and post-call transcripts.
+Portal wiring contract: [docs/integration/hireportal-contract.md](docs/integration/hireportal-contract.md).
+**Complete documentation with architecture diagrams: [DOCUMENTATION.md](DOCUMENTATION.md).**
 
 ## Run Locally
 
-Use two terminals:
-
 ```bash
+cp .env.example .env                              # LiveKit + storage config
+docker compose -f docker-compose.livekit.yml up   # media plane (LiveKit + egress)
 npm run dev:api
 npm run dev:vite
 ```
 
 Frontend: `http://127.0.0.1:5180`  
-API/signaling: `http://127.0.0.1:4321`
+API: `http://127.0.0.1:4321` · LiveKit: `ws://127.0.0.1:7880`
+
+Without a LiveKit server, everything except the in-call media works; the call
+screen reports "Media server offline".
 
 ## Scope
 
 - Vite + React frontend.
-- Node/Express API.
+- Node/Express API (control plane).
 - SQLite room and access-token storage via `node:sqlite`.
-- `ws` signaling at `/ws/signaling`.
-- Native `RTCPeerConnection` P2P with configurable ICE servers and public STUN by default.
+- LiveKit SFU media plane (`livekit-client` in the browser, `livekit-server-sdk`
+  token issuance/egress/webhooks on the server); rooms up to 5 participants.
+- Interview mapping per room: HirePortal `candidate_id`/`recruiter_id`, invitee
+  email allowlist, scheduled slot with configurable join window (host/admin bypass).
+- Room recordings via LiveKit composite egress into a storage adapter
+  (`local` project folder for dev, S3-compatible bucket for production) with
+  acknowledge-to-enter consent, playback/download RBAC, and audit.
+- Post-call transcription of recordings (OpenAI Whisper API, offline stub for
+  dev/tests) into the existing transcript tables and RBAC.
+- Portal join paths: HirePortal-minted LiveKit JWTs accepted at
+  `POST /api/portal/access` (auto-admit) or directly by the LiveKit server.
 - Scrypt password hashing with per-room salt.
 - Opaque short-lived access tokens.
-- Server-side two-participant occupancy limit.
+- Server-side occupancy limit (per-room cap, 2–5).
 - Separate admin/operator auth plane at `/admin` with bootstrap setup, session cookies, CSRF checks, RBAC foundations, audit events, room visibility, admin room creation, local lifecycle controls, room search/filtering, policy toggles, and lifecycle history.
 - Separate local integration plane at `/api/integrations/*` with server-to-server bearer credentials, hashed API keys, scoped local clients, external room link records, linked external identities, admin-only projections, audit events, and local mock webhook delivery records.
 - Local retained text chat, disabled by default per room, with explicit chat RBAC, participant admission/status checks, capped message size/rate/list/export behavior, audit events without message bodies, and redaction/delete projections.
@@ -31,7 +48,7 @@ API/signaling: `http://127.0.0.1:4321`
 - Local mock recording metadata, disabled by default per room, with a separate participant notice acknowledgement, explicit recording RBAC, metadata-only mock start/finalize/fail/delete controls, and media-free audit events.
 - Local-only iframe/embed foundations with route-scoped `/embed/*` frame policy, exact local origin allowlists, short-lived hashed scoped embed sessions, embed-safe APIs, validated postMessage helpers, explicit `embed:*` RBAC, and in-repo local examples only.
 
-No real speech-to-text, browser speech APIs, cloud speech APIs, audio/media capture, TURN/SFU, paid service, production credentials, media recording bytes, playback, download/export, object storage, local media file storage, SDP/ICE persistence, real external callbacks, vendors, production API keys, public SDK package, hosted public examples, or analytics are included in this slice.
+TASK-0088 opened the previous review gate for media capture: real recordings (LiveKit egress), media storage (local folder or S3), playback/download, and post-call cloud STT are now in scope and RBAC/consent-gated. Still excluded: live captions from real audio, browser speech APIs, real outbound webhooks, public SDK package, hosted public examples, and analytics.
 
 ## Admin Bootstrap
 
@@ -46,7 +63,7 @@ ADMIN_BOOTSTRAP_PASSWORD=ChangeMe-Admin-0086!
 
 Production/public admin activation must provide environment-owned bootstrap credentials using `ADMIN_BOOTSTRAP_EMAIL` plus either `ADMIN_BOOTSTRAP_PASSWORD` or `ADMIN_BOOTSTRAP_PASSWORD_HASH`. The known local default password is refused in production, and the first successful bootstrap login must rotate the password before normal admin room visibility is available.
 
-Admin sessions are stored server-side, sent as `HttpOnly` same-site cookies, and protected by CSRF tokens for mutating admin actions. Participant room tokens do not authorize `/api/admin/*`, and admin sessions do not authorize `/ws/signaling`.
+Admin sessions are stored server-side, sent as `HttpOnly` same-site cookies, and protected by CSRF tokens for mutating admin actions. Participant room tokens do not authorize `/api/admin/*`, and admin sessions do not authorize participant media credentials (`/api/rooms/:roomId/livekit-token`).
 
 Current local admin lifecycle commands include create, lock, unlock, expire, disable, extend, and end-for-all. These commands are RBAC-gated, CSRF-protected, audit logged, and recorded in room lifecycle history.
 
@@ -56,7 +73,7 @@ Local retained chat is opt-in per room and text-only. Participants can read or s
 
 Local mock transcripts and live captions are also opt-in per room. Participants can poll caption segments only after valid header credentials, admitted access, active room status, enabled room policy, and transcript notice acknowledgement. The only transcript provider in this local slice is `mock_local`; admins append deterministic mock text segments for testing. Transcript body access is controlled by `transcripts:view`, export by `transcripts:export`, redaction by `transcripts:redact`, delete by `transcripts:delete`, settings by `transcripts:configure`, and mock controls by `transcripts:manage_mock`.
 
-Local mock recording metadata is opt-in per room and never captures or stores audio/video. Participants can read or update recording notice consent only with valid header credentials, admitted access, and active room status. Admin recording metadata access is controlled by `recordings:view`, settings by `recordings:configure`, mock metadata controls by `recordings:manage_mock`, and deletion by `recordings:delete`. Recording artifact projections intentionally omit storage keys, media URLs, playback/download links, and byte payloads; mock artifacts always use `source=mock_metadata`, `storageProvider=none`, and zero bytes.
+Room recording is opt-in per room and acknowledge-to-enter: when recording is enabled, participants cannot obtain media credentials until they acknowledge the recording notice. Real recordings (`source=livekit_egress`) are started/stopped by admins with `recordings:manage`, auto-stop on room end, store media through the storage adapter (never in SQLite), and hide storage keys from all projections — playback goes through `GET /api/admin/rooms/:roomId/recordings/:id/media` behind `recordings:playback`. Finalized recordings are transcribed automatically (post-call, `source=recording_stt`); failed jobs retry with bounds and can be re-run via `recordings:manage`. Legacy mock metadata artifacts remain readable and gated behind `recordings:manage_mock`.
 
 Local integration controls are server-to-server only. Admins with integration permissions can create scoped local clients and inspect client prefixes, linked systems, room external links, external identities, and local mock webhook attempts. API keys are returned only once at creation, stored hashed, and never exposed in admin projections or browser bundles. Webhook attempts are recorded locally for verification; the app does not send real external callbacks without a separate approval and security/release review.
 
@@ -133,11 +150,10 @@ WEBRTC_TRANSCRIPT_SEGMENT_WINDOW_MS=60000
 WEBRTC_EMBED_SESSION_TTL_MS=600000
 ```
 
-Public review limitations:
+Deployment notes (AWS target — see [docs/release/aws-deploy.md](docs/release/aws-deploy.md)):
 
-- `/tmp/webrtc.sqlite` is ephemeral. Rooms, tokens, and presence can disappear on restart, redeploy, rollback, or free-service spin-down.
-- Rollback for the first no-spend review means redeploying/reverting code and accepting ephemeral SQLite reset. Durable rollback, backup, and restore require a separate persistence checkpoint.
-- Cleanup for any later approved review service must remove the temporary service and environment variables, then verify the public URL no longer serves `/`, `/api/health`, `/embed/*`, `/api/admin/*`, `/api/integrations/*`, or `/ws/signaling`.
-- Direct P2P with public STUN is not guaranteed across restrictive NAT/firewall networks. TURN requires separate David approval for provider choice, credentials, and possible spending.
-- Do not publish, create paid resources, add persistent disks/Postgres, configure TURN, inject secrets, or change DNS without explicit approval.
-- Do not enable real speech-to-text, browser speech APIs, cloud speech APIs, recording bytes, playback/download/export, media file storage, object storage, managed media, external vendors, real external webhook sends, public iframe/SDK distribution, production integration API keys, or production admin credentials without explicit approval and another security review. Local retained text chat, local mock transcripts, local mock recording metadata, and local embed examples remain review-gated before any production rollout or production persistence.
+- SQLite is the durable store; mount `data/` (DB + local recordings) on a persistent volume, or set `WEBRTC_DB_PATH` and `WEBRTC_STORAGE_MODE=s3`. Schema migrations run automatically at startup (`addColumnIfMissing` + one-time artifact-table rebuild).
+- Recording capture, media storage (local/S3), playback/download, and post-call cloud STT were approved and delivered under TASK-0088; they stay RBAC- and consent-gated. Live captions from real audio, real outbound webhook sends, and a public SDK remain review-gated.
+- TURN is provided by the LiveKit deployment (built-in TURN/TLS) rather than a separate vendor.
+- Remote embed origins require `WEBRTC_EMBED_ALLOW_REMOTE_ORIGINS=1` and https; browser API access from the portal requires its origin in `WEBRTC_CORS_ORIGINS`.
+- Production admin bootstrap still requires environment-owned credentials (`ADMIN_BOOTSTRAP_EMAIL` + `ADMIN_BOOTSTRAP_PASSWORD[_HASH]`); the local default password is refused in production.

@@ -4,11 +4,11 @@ import { adminApi } from '../lib/api.js'
 import { Avatar, Field, Skeleton, ToastProvider } from '../ui/kit.jsx'
 import {
   IconChevronDown, IconFileText, IconList, IconLogout, IconPlug, IconRecord,
-  IconSettings, IconUser, IconVideo,
+  IconSettings, IconUser, IconUsers, IconVideo,
 } from '../ui/icons.jsx'
 import { RoomsPage } from './rooms.jsx'
 import { RoomDetailPage } from './room-detail.jsx'
-import { AuditPage, IntegrationsPage, ProfilePage, RecordingsPage, TranscriptsPage } from './misc-pages.jsx'
+import { AuditPage, IntegrationsPage, ProfilePage, RecordingsPage, TeamPage, TranscriptsPage } from './misc-pages.jsx'
 import { DeploymentPage } from './deployment.jsx'
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,7 @@ export function AdminPortal() {
             <Route path="recordings" element={<RecordingsPage />} />
             <Route path="transcripts" element={<TranscriptsPage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
+            <Route path="team" element={<TeamPage />} />
             <Route path="deployment" element={<DeploymentPage />} />
             <Route path="audit" element={<AuditPage />} />
             <Route path="profile" element={<ProfilePage />} />
@@ -204,6 +205,7 @@ const NAV = [
   { to: 'recordings', label: 'Recordings', icon: IconRecord, permission: 'recordings:view' },
   { to: 'transcripts', label: 'Transcripts', icon: IconFileText, permission: 'transcripts:view' },
   { to: 'integrations', label: 'Integrations', icon: IconPlug, permission: 'integrations:view' },
+  { to: 'team', label: 'Team', icon: IconUsers, permission: 'admin_users:manage' },
   { to: 'deployment', label: 'Deployment', icon: IconSettings, permission: null },
   { to: 'audit', label: 'Audit log', icon: IconList, permission: 'audit:view' },
   { to: 'profile', label: 'Profile', icon: IconUser, permission: null },

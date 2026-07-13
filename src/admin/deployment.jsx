@@ -151,6 +151,14 @@ WEBRTC_S3_SECRET_KEY=<IAM secret>
 WEBRTC_STT_PROVIDER=openai
 WEBRTC_OPENAI_API_KEY=<OpenAI key>
 
+# Email — AWS SES (verify the from-domain in SES first)
+WEBRTC_EMAIL_PROVIDER=ses
+WEBRTC_EMAIL_FROM=InterviewRooms <no-reply@example.com>
+WEBRTC_SES_REGION=us-east-1
+# omit the SES keypair to use the instance IAM role instead
+WEBRTC_SES_ACCESS_KEY=<IAM access key with ses:SendEmail>
+WEBRTC_SES_SECRET_KEY=<IAM secret>
+
 # Browser access from the portal
 WEBRTC_CORS_ORIGINS=https://hireportal.example.com
 WEBRTC_EMBED_ALLOW_REMOTE_ORIGINS=1

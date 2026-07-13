@@ -403,6 +403,83 @@ export function AuditPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Team — admin users: list + invite with a one-time password.
+// ---------------------------------------------------------------------------
+const ROLE_OPTIONS = [
+  { key: 'platform_admin', label: 'Platform admin — everything' },
+  { key: 'operator', label: 'Operator — run interviews day to day' },
+  { key: 'support_reviewer', label: 'Support reviewer — read-only rooms + audit' },
+  { key: 'auditor', label: 'Auditor — audit log only' },
+]
+
+export function TeamPage() {
+  const { call } = useAdmin()
+  const toast = useToast()
+  const [data, setData] = useState(null)
+  const [draft, setDraft] = useState({ email: '', displayName: '', roleKey: 'operator' })
+  const [busy, setBusy] = useState(false)
+  const [issued, setIssued] = useState(null) // { email, temporaryPassword }
+
+  const load = useCallback(() => call('/api/admin/users').then(setData), [call])
+  useEffect(() => {
+    load().catch((err) => toast(err.message, 'error'))
+  }, [load, toast])
+
+  const invite = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    try {
+      const body = await call('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ email: draft.email, displayName: draft.displayName, roleKeys: [draft.roleKey] }),
+      })
+      setIssued({ email: body.user.email, temporaryPassword: body.temporaryPassword, delivered: body.email.deliveryEnabled })
+      setDraft({ email: '', displayName: '', roleKey: 'operator' })
+      toast('Admin user created', 'success')
+      await load()
+    } catch (err) {
+      toast(err.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <ListPage title="Team" sub="Admin accounts, their roles, and invitations.">
+      <div className="card-pad">
+        <form className="inline-actions" onSubmit={invite} style={{ marginBottom: 16 }}>
+          <input type="email" value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} placeholder="email@company.com" required style={{ width: 220 }} />
+          <input value={draft.displayName} onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} placeholder="Display name" style={{ width: 170 }} />
+          <select value={draft.roleKey} onChange={(event) => setDraft({ ...draft, roleKey: event.target.value })} aria-label="Role">
+            {ROLE_OPTIONS.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
+          </select>
+          <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Invite admin'}</button>
+        </form>
+        {issued ? (
+          <div className="error-banner" style={{ background: 'var(--blue-50)', borderColor: 'var(--blue-500)', color: 'var(--blue-700)', marginBottom: 16 }}>
+            One-time password for <strong>{issued.email}</strong>: <code>{issued.temporaryPassword}</code>
+            {issued.delivered ? ' (also emailed via SES)' : ' — email provider is in local mode, share this manually. They will set their own password on first sign-in.'}
+          </div>
+        ) : null}
+        {!data ? <Skeleton lines={4} /> : (
+          <DataTable
+            columns={[
+              { key: 'displayName', label: 'Admin', sortable: true, render: (user) => <span><span className="cell-main">{user.displayName}</span><span className="cell-sub">{user.email}</span></span> },
+              { key: 'roles', label: 'Roles', render: (user) => <span className="chip-row">{(user.roles || []).map((role) => <Badge key={role.key} tone="blue">{role.name}</Badge>)}</span> },
+              { key: 'status', label: 'Status', render: (user) => <StatusBadge status={user.setupRequired ? 'waiting' : user.status} /> },
+              { key: 'lastLoginAt', label: 'Last sign-in', sortable: true, render: (user) => fmtDateTime(user.lastLoginAt) },
+            ]}
+            rows={data.users}
+            rowKey={(user) => user.id}
+            empty={<EmptyState title="No admins" text="Invite your first teammate above." />}
+          />
+        )}
+      </div>
+    </ListPage>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Profile — identity, roles, permissions.
 // ---------------------------------------------------------------------------
 export function ProfilePage() {

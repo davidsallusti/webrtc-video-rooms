@@ -328,6 +328,29 @@ export const openApiSpec = {
           permissions: { type: 'array', items: { type: 'string' } },
         },
       },
+      OutboxEmail: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          toEmail: { type: 'string' },
+          templateKey: { type: 'string', enum: ['room_invitation', 'admin_welcome'] },
+          subject: { type: 'string' },
+          provider: { type: 'string', enum: ['local', 'ses'] },
+          status: { type: 'string', enum: ['local_recorded', 'sent', 'failed'] },
+          error: { type: ['string', 'null'] },
+          createdAt: { type: 'string', format: 'date-time' },
+          sentAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      EmailStatus: {
+        type: 'object',
+        description: 'Active email provider. `local` composes and records emails in the outbox without sending; `ses` delivers via AWS SES.',
+        properties: {
+          provider: { type: 'string', enum: ['local', 'ses'] },
+          from: { type: 'string' },
+          deliveryEnabled: { type: 'boolean' },
+        },
+      },
       AdminAuthPayload: {
         type: 'object',
         description: 'Session payload. `csrfToken` must be echoed as `x-csrf-token` on every mutating admin call.',
@@ -887,6 +910,58 @@ const adminPaths = {
       csrf: true,
       params: [roomIdParam, pathParam('participantId', 'Waiting guest id.'), pathParam('decision', '`admit` or `reject`.')],
       responses: { ...okJson({ type: 'object', properties: { participant: { type: 'object' }, waitingParticipants: { type: 'array', items: ref('WaitingParticipant') } } }), ...errs(400, 401, 403, 404) },
+    }),
+  },
+
+  // ------------------------------------------------------------------ emails
+  '/api/admin/rooms/{roomId}/emails': {
+    get: adminOp({
+      tag: 'Admin — Rooms',
+      summary: 'Room email outbox',
+      permission: 'rooms:view_all',
+      description: 'Invitation emails recorded for this room, plus the active email provider (`local` records only; `ses` delivers via AWS SES).',
+      params: [roomIdParam],
+      query: [q('limit', 'Max 100.', { type: 'integer' })],
+      responses: { ...okJson({ type: 'object', properties: { emails: { type: 'array', items: ref('OutboxEmail') }, email: ref('EmailStatus') } }), ...errs(401, 403) },
+    }),
+  },
+  '/api/admin/rooms/{roomId}/invitees/{inviteeEmail}/resend-invite': {
+    post: adminOp({
+      tag: 'Admin — Rooms',
+      summary: 'Resend an invitation email',
+      description: 'Re-sends the room invitation to an existing invitee. The room password is never included on resends (it is not stored in plaintext) — the email tells the invitee it is shared separately.',
+      permission: 'rooms:update_policy',
+      csrf: true,
+      params: [roomIdParam, pathParam('inviteeEmail', 'Invitee email address.')],
+      responses: { 202: { description: 'Email queued/recorded.', content: json({ type: 'object', properties: { queued: { type: 'boolean' }, email: ref('EmailStatus') } }) }, ...errs(401, 403, 404) },
+    }),
+  },
+
+  // -------------------------------------------------------------------- team
+  '/api/admin/users': {
+    get: adminOp({
+      tag: 'Admin — Auth',
+      summary: 'List admin users',
+      permission: 'admin_users:manage',
+      description: 'All admin accounts with roles and setup state.',
+      responses: { ...okJson({ type: 'object', properties: { users: { type: 'array', items: ref('AdminUser') }, email: ref('EmailStatus') } }), ...errs(401, 403) },
+    }),
+    post: adminOp({
+      tag: 'Admin — Auth',
+      summary: 'Create an admin user',
+      description: 'Creates an invited admin with a generated one-time password (returned once in the response, and emailed when the SES provider is active). First sign-in forces a password rotation. Default role: `operator`.',
+      permission: 'admin_users:manage',
+      csrf: true,
+      body: {
+        type: 'object',
+        required: ['email'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          displayName: { type: 'string', maxLength: 120 },
+          roleKeys: { type: 'array', items: { type: 'string', enum: ['platform_admin', 'operator', 'support_reviewer', 'auditor'] } },
+        },
+      },
+      responses: { 201: { description: 'User created; `temporaryPassword` is shown only once.', content: json({ type: 'object', properties: { user: ref('AdminUser'), temporaryPassword: { type: 'string' }, email: ref('EmailStatus') } }) }, ...errs(400, 401, 403, 409) },
     }),
   },
 

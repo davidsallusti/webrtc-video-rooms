@@ -58,6 +58,7 @@ export function RoomDetailPage() {
     ...(can('chat:view') ? [{ key: 'chat', label: 'Chat' }] : []),
     ...(can('waiting_room:view') ? [{ key: 'waiting', label: `Waiting room${room.waitingParticipants?.length ? ` (${room.waitingParticipants.length})` : ''}` }] : []),
     ...(can('embed:view') ? [{ key: 'embed', label: 'Embed' }] : []),
+    { key: 'emails', label: 'Emails' },
     { key: 'audit', label: 'Audit' },
   ]
 
@@ -95,6 +96,7 @@ export function RoomDetailPage() {
           {tab === 'chat' ? <ChatTab room={room} act={act} /> : null}
           {tab === 'waiting' ? <WaitingTab room={room} act={act} /> : null}
           {tab === 'embed' ? <EmbedTab room={room} act={act} /> : null}
+          {tab === 'emails' ? <EmailsTab room={room} /> : null}
           {tab === 'audit' ? <AuditTab audit={audit} lifecycle={room.lifecycle} /> : null}
         </div>
       </div>
@@ -590,6 +592,64 @@ function EmbedTab({ room }) {
         rows={data.sessions || []}
         rowKey={(session) => session.id}
         empty={<EmptyState title="No embed sessions" text={enabled ? 'Issue a session to test the iframe surface.' : 'Enable embedding for this room first.'} />}
+      />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Emails — invitation outbox + per-invitee resend.
+// ---------------------------------------------------------------------------
+function EmailsTab({ room }) {
+  const { call, can } = useAdmin()
+  const toast = useToast()
+  const [data, setData] = useState(null)
+
+  const load = useCallback(() => call(`/api/admin/rooms/${room.id}/emails`), [call, room.id])
+  useEffect(() => {
+    load().then(setData).catch((err) => toast(err.message, 'error'))
+  }, [load, toast])
+
+  if (!data) return <Skeleton lines={4} />
+
+  const resend = async (email) => {
+    try {
+      await call(`/api/admin/rooms/${room.id}/invitees/${encodeURIComponent(email)}/resend-invite`, { method: 'POST' })
+      toast(data.email.deliveryEnabled ? 'Invitation queued' : 'Invitation recorded (local mode — nothing is sent)', 'success')
+      load().then(setData).catch(() => {})
+    } catch (err) {
+      toast(err.message, 'error')
+    }
+  }
+
+  return (
+    <div>
+      <p className="muted" style={{ marginBottom: 14 }}>
+        Provider: <Badge tone={data.email.deliveryEnabled ? 'green' : 'gray'}>{data.email.provider}</Badge>{' '}
+        {data.email.deliveryEnabled
+          ? `— delivering via AWS SES as ${data.email.from}.`
+          : '— local mode: emails are composed and recorded here, but nothing is sent. Set WEBRTC_EMAIL_PROVIDER=ses in production.'}
+      </p>
+      {(room.invitees || []).length && can('rooms:update_policy') ? (
+        <div className="inline-actions" style={{ marginBottom: 14 }}>
+          {(room.invitees || []).map((invitee) => (
+            <button key={invitee.email} type="button" className="btn btn-xs" onClick={() => resend(invitee.email)}>
+              Resend to {invitee.email}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <DataTable
+        columns={[
+          { key: 'toEmail', label: 'To', sortable: true },
+          { key: 'templateKey', label: 'Template', render: (row) => <span className="mono">{row.templateKey}</span> },
+          { key: 'subject', label: 'Subject' },
+          { key: 'status', label: 'Status', render: (row) => <StatusBadge status={row.status === 'local_recorded' ? 'waiting' : row.status === 'sent' ? 'finalized' : 'failed'} /> },
+          { key: 'createdAt', label: 'When', sortable: true, render: (row) => fmtDateTime(row.createdAt) },
+        ]}
+        rows={data.emails}
+        rowKey={(row) => row.id}
+        empty={<EmptyState title="No emails yet" text="Invitation emails appear here when invitees are added to this room." />}
       />
     </div>
   )

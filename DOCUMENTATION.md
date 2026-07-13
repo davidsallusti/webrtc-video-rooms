@@ -82,7 +82,8 @@ app streams/presigns on playback.
 | Recording | LiveKit composite egress → local folder (dev) or S3 (prod); acknowledge-to-enter consent; playback/download behind RBAC; auto-stop on room end |
 | Transcripts | Post-call STT of finalized recordings (OpenAI Whisper or offline stub); segments with redact/delete/export; bounded retries + manual re-run |
 | Chat | Realtime over LiveKit data channel; optional retained history with moderation (redact/delete/export) |
-| Admin console | Zoom-style SaaS UI: rooms table, tabbed room detail, global recordings/transcripts tables, integrations, audit log, deployment guide, interactive API docs |
+| Admin console | Zoom-style SaaS UI: rooms table, tabbed room detail, global recordings/transcripts tables, integrations, team management, audit log, deployment guide, interactive API docs |
+| Email | Invitation emails to room invitees (create/update/resend) and admin welcome emails with one-time passwords; `local` outbox provider by default, AWS SES in production (`server/email.mjs`) |
 | Integration API | Bearer-key server-to-server: provision interview rooms, read room status (occupancy + artifact summaries) |
 | Portal trust | HirePortal-minted LiveKit JWTs accepted as login proof; recruiters auto-host |
 | Security | scrypt hashing, short-lived opaque tokens, RBAC (4 roles / 40+ permissions), CSRF, strict CSP, rate limits everywhere, immutable audit log |
@@ -431,6 +432,8 @@ portal's AI builder, pre-filled with the deployment's URLs. Full contract:
 | `WEBRTC_S3_PRESIGN_TTL_SECONDS` | `900` | playback URL lifetime |
 | `WEBRTC_STT_PROVIDER` | `stub` (or `openai` if key set) | post-call transcription provider |
 | `WEBRTC_OPENAI_API_KEY` / `WEBRTC_STT_MODEL` | — / `whisper-1` | Whisper credentials |
+| `WEBRTC_EMAIL_PROVIDER` | `local` | `local` records emails in the outbox only; `ses` delivers via AWS SES v2 |
+| `WEBRTC_EMAIL_FROM` / `WEBRTC_SES_REGION` / `WEBRTC_SES_ACCESS_KEY/SECRET_KEY` | — | SES sender + credentials (omit keypair to use the IAM role) |
 | `WEBRTC_CORS_ORIGINS` | — | comma-separated browser origins (the portal) |
 | `WEBRTC_EMBED_ALLOW_REMOTE_ORIGINS` | `0` | allow https non-localhost embed origins |
 | `WEBRTC_ROOM_TTL_HOURS` | `24` | unscheduled-room lifetime |

@@ -15,9 +15,13 @@ import {
   configureRoomEmbedSettings,
   configureRecordingSettings,
   configureTranscriptSettings,
+  createAdminUser,
   createParticipantChatMessage,
   db,
   decideWaitingParticipant,
+  findRoomInvitee,
+  listAdminUsers,
+  listRoomInvitees,
   deleteRoomChatMessage,
   deleteRecordingArtifact,
   deleteTranscriptArtifact,
@@ -62,6 +66,7 @@ import {
   verifyStoredHash,
 } from './store.mjs'
 import { retryTranscription, startRecording, stopRecording } from './recordings.mjs'
+import { emailStatus, listRoomEmails, sendAdminWelcome, sendRoomInvitations } from './email.mjs'
 import { openRecordingMedia } from './storage.mjs'
 import { createRateLimiter, readLimit } from './rate-limit.mjs'
 
@@ -168,6 +173,13 @@ function futureIso(ms) {
 
 function randomId(bytes = 12) {
   return randomBytes(bytes).toString('base64url')
+}
+
+// Origin used in outgoing email links: explicit public origin in production,
+// the request's own origin otherwise (dev).
+function emailOrigin(req) {
+  if (process.env.WEBRTC_PUBLIC_ORIGIN) return process.env.WEBRTC_PUBLIC_ORIGIN
+  return `${req.protocol}://${req.get('host') || ''}`
 }
 
 function genericAuthError() {
@@ -764,11 +776,17 @@ export function createAdminRouter({ isProduction, clientIp, onRoomEnded }) {
       ip: clientIp(req),
       userAgent: req.get('user-agent'),
     })
+    // Invitation emails go out at creation time — the only moment the room
+    // password exists in plaintext to include.
+    if (result.room.invitees?.length) {
+      sendRoomInvitations({ room: result.room, invitees: result.room.invitees, origin: emailOrigin(req), password })
+    }
     res.status(201).json(result)
   })
 
   router.patch('/rooms/:roomId/interview-config', requireAdmin('rooms:update_policy'), requireCsrf, (req, res) => {
     const { schedule, invitees, candidateId, recruiterId, maxParticipants } = req.body || {}
+    const priorEmails = new Set(listRoomInvitees(req.params.roomId).map((invitee) => invitee.email))
     const room = updateRoomInterviewConfig({
       roomId: req.params.roomId,
       schedule,
@@ -780,7 +798,58 @@ export function createAdminRouter({ isProduction, clientIp, onRoomEnded }) {
       ip: clientIp(req),
       userAgent: req.get('user-agent'),
     })
+    // Only newly added invitees get an email (no password — it is not stored).
+    const added = (room.invitees || []).filter((invitee) => !priorEmails.has(invitee.email))
+    if (added.length) sendRoomInvitations({ room, invitees: added, origin: emailOrigin(req) })
     res.json({ room })
+  })
+
+  router.post('/rooms/:roomId/invitees/:inviteeEmail/resend-invite', requireAdmin('rooms:update_policy'), requireCsrf, (req, res) => {
+    const invitee = findRoomInvitee(req.params.roomId, req.params.inviteeEmail)
+    if (!invitee) {
+      res.status(404).json({ error: 'invitee_not_found', message: 'No such invitee on this room.' })
+      return
+    }
+    const detail = roomDetail(req.params.roomId)
+    sendRoomInvitations({ room: detail, invitees: [invitee], origin: emailOrigin(req) })
+    recordAuditEvent({
+      actorType: 'admin',
+      actorId: req.admin.user.id,
+      action: 'room.invite_resent',
+      resourceType: 'room',
+      resourceId: req.params.roomId,
+      roomId: req.params.roomId,
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+      metadata: { inviteeEmailHash: hashAuditValue(invitee.email) },
+    })
+    res.status(202).json({ queued: true, email: emailStatus() })
+  })
+
+  router.get('/rooms/:roomId/emails', requireAdmin('rooms:view_all'), (req, res) => {
+    res.json({ emails: listRoomEmails(req.params.roomId, req.query.limit), email: emailStatus() })
+  })
+
+  // ---- Team (admin users) ----------------------------------------------------
+  router.get('/users', requireAdmin('admin_users:manage'), (_req, res) => {
+    res.json({ users: listAdminUsers(), email: emailStatus() })
+  })
+
+  router.post('/users', requireAdmin('admin_users:manage'), requireCsrf, (req, res) => {
+    // One-time password: emailed (ses) or handed over manually (local mode —
+    // it is returned in the response exactly once for that reason).
+    const temporaryPassword = `Temp-${randomId(9)}-1!`
+    const user = createAdminUser({
+      email: req.body?.email,
+      displayName: req.body?.displayName,
+      roleKeys: req.body?.roleKeys,
+      temporaryPassword,
+      actorId: req.admin.user.id,
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+    })
+    sendAdminWelcome({ user, temporaryPassword, origin: emailOrigin(req) })
+    res.status(201).json({ user, temporaryPassword, email: emailStatus() })
   })
 
   router.get('/rooms/:roomId', requireAdmin('rooms:view_all'), (req, res) => {

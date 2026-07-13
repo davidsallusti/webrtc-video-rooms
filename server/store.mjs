@@ -399,6 +399,20 @@ db.exec(`
     created_at text not null
   );
 
+  create table if not exists email_outbox (
+    id text primary key,
+    to_email text not null,
+    template_key text not null,
+    subject text not null,
+    body_text text not null,
+    room_id text references rooms(id),
+    provider text not null,
+    status text not null check(status in ('local_recorded','sent','failed')),
+    error text,
+    created_at text not null,
+    sent_at text
+  );
+
   create table if not exists room_invitees (
     id text primary key,
     room_id text not null references rooms(id),
@@ -458,6 +472,7 @@ db.exec(`
   create index if not exists embed_sessions_room_origin_idx on embed_sessions(room_id, allowed_origin);
   create index if not exists embed_origin_events_room_created_idx on embed_origin_events(room_id, created_at);
   create index if not exists room_invitees_room_email_idx on room_invitees(room_id, email);
+  create index if not exists email_outbox_room_created_idx on email_outbox(room_id, created_at);
 `)
 
 addColumnIfMissing('integration_clients', 'system_key', 'text')
@@ -1999,6 +2014,111 @@ export function createEgressRecordingArtifact({ roomId, storageProvider, storage
     metadata: { source: 'livekit_egress', storageProvider },
   })
   return recordingArtifactProjection(requireRecordingArtifact(roomId, id))
+}
+
+// ---- Email outbox -----------------------------------------------------------
+// Every outgoing email is recorded here regardless of provider. The local
+// provider only records (status=local_recorded); SES records sent/failed.
+
+export function recordOutboxEmail({ toEmail, templateKey, subject, bodyText, roomId = null, provider, status, error = null }) {
+  const id = randomId(12)
+  const ts = nowIso()
+  db.prepare(`
+    insert into email_outbox (id, to_email, template_key, subject, body_text, room_id, provider, status, error, created_at, sent_at)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, toEmail, templateKey, subject, bodyText, roomId, provider, status, error, ts, status === 'sent' ? ts : null)
+  return id
+}
+
+export function markOutboxEmail(id, { status, error = null }) {
+  db.prepare('update email_outbox set status = ?, error = ?, sent_at = ? where id = ?')
+    .run(status, error, status === 'sent' ? nowIso() : null, id)
+}
+
+export function listRoomEmails(roomId, limit = 50) {
+  const capped = Math.max(1, Math.min(100, Number(limit || 50)))
+  return db.prepare(`
+    select id, to_email as toEmail, template_key as templateKey, subject, provider, status, error,
+      created_at as createdAt, sent_at as sentAt
+    from email_outbox
+    where room_id = ?
+    order by created_at desc
+    limit ?
+  `).all(roomId, capped)
+}
+
+// ---- Admin user management ---------------------------------------------------
+
+const adminUserView = (row, roles = []) => ({
+  id: row.id,
+  email: row.email,
+  displayName: row.display_name,
+  status: row.status,
+  setupRequired: Boolean(row.requires_password_change),
+  createdAt: row.created_at,
+  lastLoginAt: row.last_login_at,
+  roles,
+})
+
+export function listAdminUsers() {
+  return db.prepare('select * from admin_users order by created_at asc').all().map((row) => adminUserView(
+    row,
+    db.prepare(`
+      select roles.key, roles.name from roles
+      join admin_user_roles on admin_user_roles.role_id = roles.id
+      where admin_user_roles.admin_user_id = ?
+    `).all(row.id),
+  ))
+}
+
+// Creates an invited admin with a one-time password; requires_password_change
+// forces rotation on first login (same flow as bootstrap setup).
+export function createAdminUser({ email, displayName, roleKeys, temporaryPassword, actorId, ip, userAgent }) {
+  const normalizedEmail = normalizeInviteeEmail(email)
+  if (!normalizedEmail) {
+    const error = new Error('A valid email address is required.')
+    error.code = 'invalid_admin_email'
+    error.status = 400
+    throw error
+  }
+  if (db.prepare('select 1 from admin_users where email = ?').get(normalizedEmail)) {
+    const error = new Error('An admin with this email already exists.')
+    error.code = 'admin_email_taken'
+    error.status = 409
+    throw error
+  }
+  const requestedRoles = Array.isArray(roleKeys) && roleKeys.length ? roleKeys : ['operator']
+  const roles = requestedRoles
+    .map((key) => db.prepare('select id, key, name from roles where key = ?').get(String(key)))
+    .filter(Boolean)
+  if (!roles.length) {
+    const error = new Error('At least one valid role is required.')
+    error.code = 'invalid_admin_roles'
+    error.status = 400
+    throw error
+  }
+  return withTransaction(() => {
+    const id = randomId(10)
+    const ts = nowIso()
+    db.prepare(`
+      insert into admin_users (id, email, password_hash, display_name, status, requires_password_change, created_at)
+      values (?, ?, ?, ?, 'active', 1, ?)
+    `).run(id, normalizedEmail, hashForStorage(temporaryPassword), String(displayName || normalizedEmail).slice(0, 120), ts)
+    for (const role of roles) {
+      db.prepare('insert into admin_user_roles (admin_user_id, role_id) values (?, ?)').run(id, role.id)
+    }
+    recordAuditEvent({
+      actorType: 'admin',
+      actorId,
+      action: 'admin_user.created',
+      resourceType: 'admin_user',
+      resourceId: id,
+      ip,
+      userAgent,
+      metadata: { roles: roles.map((role) => role.key) },
+    })
+    return adminUserView(db.prepare('select * from admin_users where id = ?').get(id), roles.map(({ key, name }) => ({ key, name })))
+  })
 }
 
 export function attachStorageKeyToRecording(roomId, recordingId, storageKey) {
@@ -3897,6 +4017,7 @@ export function resetForTests() {
     delete from external_systems;
     delete from integration_clients;
     delete from room_metadata;
+    delete from email_outbox;
     delete from room_invitees;
     delete from room_presence;
     delete from room_access_tokens;

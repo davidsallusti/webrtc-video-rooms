@@ -6,6 +6,7 @@ import {
   recordAuditEvent,
   requireIntegrationScope,
 } from './store.mjs'
+import { sendRoomInvitations } from './email.mjs'
 import { createRateLimiter, readLimit } from './rate-limit.mjs'
 
 const authLimiter = createRateLimiter({
@@ -78,6 +79,19 @@ export function createIntegrationRouter({ clientIp }) {
         ip: clientIp(req),
         userAgent: req.get('user-agent'),
       })
+      // Portal-provisioned rooms email their invitees too (password included —
+      // it exists in plaintext only here at creation time).
+      if (req.body?.invitees?.length) {
+        const origin = process.env.WEBRTC_PUBLIC_ORIGIN || `${req.protocol}://${req.get('host') || ''}`
+        sendRoomInvitations({
+          room: { ...result.room, invitees: undefined },
+          invitees: req.body.invitees
+            .map((invitee) => ({ email: String(invitee?.email || '').trim().toLowerCase(), displayName: invitee?.displayName }))
+            .filter((invitee) => invitee.email),
+          origin,
+          password: req.body.password,
+        })
+      }
       res.status(201).json(result)
     } catch (error) {
       next(error)

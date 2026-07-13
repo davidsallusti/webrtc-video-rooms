@@ -29,11 +29,10 @@ const forbiddenSurfacePatterns = [
   /BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY/,
   /AWS_ACCESS_KEY_ID/,
   /AWS_SECRET_ACCESS_KEY/,
-  /\bS3\b|@aws-sdk|aws-sdk/i,
+  // TASK-0088 approved S3 storage, LiveKit TURN, and presigned playback, so
+  // those former gates are no longer forbidden surfaces.
   /cloudflare|twilio|sendgrid|datadog|sentry\.io/i,
-  /turn:\S+|coturn/i,
   /MediaRecorder|createObjectURL/i,
-  /signedUrl|signed_url/i,
   /ngrok|localtunnel/i,
 ]
 

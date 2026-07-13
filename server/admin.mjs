@@ -1,5 +1,7 @@
 import express from 'express'
 import { randomBytes } from 'node:crypto'
+import swaggerUiDist from 'swagger-ui-dist'
+import { openApiSpec } from './openapi.mjs'
 import {
   authenticateAccess,
   admissionStatus as roomAdmissionStatus,
@@ -33,6 +35,8 @@ import {
   hashForStorage,
   issueEmbedSession,
   lifecycleEventsForRoom,
+  listAllRecordings,
+  listAllTranscripts,
   listIntegrationOverview,
   listRoomRecordings,
   listRoomTranscripts,
@@ -43,6 +47,7 @@ import {
   participantTranscriptStatus,
   recordAuditEvent,
   recordParticipantRecordingConsent,
+  recordingStorageCoordinates,
   redactRoomChatMessage,
   redactTranscriptSegment,
   recordParticipantTranscriptConsent,
@@ -52,9 +57,12 @@ import {
   startMockTranscript,
   tokenHash,
   transitionRoomLifecycle,
+  updateRoomInterviewConfig,
   updateRoomPolicy,
   verifyStoredHash,
 } from './store.mjs'
+import { retryTranscription, startRecording, stopRecording } from './recordings.mjs'
+import { openRecordingMedia } from './storage.mjs'
 import { createRateLimiter, readLimit } from './rate-limit.mjs'
 
 const SESSION_COOKIE = 'webrtc_admin_session'
@@ -105,8 +113,10 @@ const permissions = [
   ['transcripts:delete', 'Delete local mock transcript artifacts or segments'],
   ['recordings:configure', 'Configure local mock recording metadata'],
   ['recordings:manage_mock', 'Manage local mock recording metadata artifacts'],
-  ['recordings:view', 'View local mock recording metadata artifacts'],
-  ['recordings:delete', 'Delete local mock recording metadata artifacts'],
+  ['recordings:manage', 'Start and stop real room recordings'],
+  ['recordings:view', 'View recording artifacts'],
+  ['recordings:playback', 'Play back and download recording media'],
+  ['recordings:delete', 'Delete recording artifacts'],
   ['embed:view', 'View local embed metadata'],
   ['embed:configure', 'Configure local embed origins'],
   ['embed:issue_token', 'Issue local embed sessions'],
@@ -140,6 +150,7 @@ const roles = [
     'transcripts:configure',
     'transcripts:manage_mock',
     'transcripts:view',
+    'recordings:manage',
     'recordings:view',
     'embed:view',
   ]],
@@ -453,6 +464,12 @@ function roomSummary(row) {
     chatRetentionPending: Boolean(row.chat_retention_pending),
     transcriptPending: Boolean(row.transcript_pending),
     recordingPending: Boolean(row.recording_pending),
+    scheduledStartAt: row.scheduled_start_at,
+    scheduledEndAt: row.scheduled_end_at,
+    joinWindowMinutes: row.join_window_minutes,
+    candidateId: row.candidate_id,
+    recruiterId: row.recruiter_id,
+    livekitRoomName: row.livekit_room_name,
     metadata,
     presenceCount: row.presence_count || 0,
   }
@@ -482,9 +499,11 @@ function listRooms({ status, query, limit, offset } = {}) {
       rooms.id like ?
       or rooms.display_name like ?
       or rooms.metadata_text_index like ?
+      or rooms.candidate_id like ?
+      or rooms.recruiter_id like ?
     )`)
     const like = `%${String(query).slice(0, 80).replaceAll('%', '').replaceAll('_', '')}%`
-    params.push(like, like, like)
+    params.push(like, like, like, like, like)
   }
   const whereSql = where.length ? `where ${where.join(' and ')}` : ''
   const pageLimit = boundedLimit(limit)
@@ -517,6 +536,12 @@ function roomDetail(roomId, { includeLifecycle = false, includeWaiting = false, 
       from room_presence
       where room_id = ?
       order by connected_at desc
+    `).all(roomId),
+    invitees: db.prepare(`
+      select email, display_name as displayName, invitee_role as inviteeRole
+      from room_invitees
+      where room_id = ?
+      order by created_at asc
     `).all(roomId),
     ...(includeWaiting ? { waitingParticipants: db.prepare(`
       select participant_id as participantId, role, admission_status as admissionStatus,
@@ -724,17 +749,38 @@ export function createAdminRouter({ isProduction, clientIp, onRoomEnded }) {
   })
 
   router.post('/rooms', requireAdmin('rooms:create'), requireCsrf, (req, res) => {
-    const { displayName, password, metadata } = req.body || {}
+    const { displayName, password, metadata, schedule, invitees, candidateId, recruiterId, maxParticipants } = req.body || {}
     const result = adminCreateRoom({
       displayName,
       password,
       metadata,
+      schedule,
+      invitees,
+      candidateId,
+      recruiterId,
+      maxParticipants,
       origin: '',
       actorId: req.admin.user.id,
       ip: clientIp(req),
       userAgent: req.get('user-agent'),
     })
     res.status(201).json(result)
+  })
+
+  router.patch('/rooms/:roomId/interview-config', requireAdmin('rooms:update_policy'), requireCsrf, (req, res) => {
+    const { schedule, invitees, candidateId, recruiterId, maxParticipants } = req.body || {}
+    const room = updateRoomInterviewConfig({
+      roomId: req.params.roomId,
+      schedule,
+      invitees,
+      candidateId,
+      recruiterId,
+      maxParticipants,
+      actorId: req.admin.user.id,
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+    })
+    res.json({ room })
   })
 
   router.get('/rooms/:roomId', requireAdmin('rooms:view_all'), (req, res) => {
@@ -993,6 +1039,57 @@ export function createAdminRouter({ isProduction, clientIp, onRoomEnded }) {
     res.json({ artifact })
   })
 
+  // Real recordings: start/stop LiveKit egress, stream media, re-run STT.
+  router.post('/rooms/:roomId/recordings/start', requireAdmin('recordings:manage'), requireCsrf, (req, res, next) => {
+    startRecording({
+      roomId: req.params.roomId,
+      actorId: req.admin.user.id,
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+    }).then((artifact) => res.status(201).json({ artifact })).catch(next)
+  })
+
+  router.post('/rooms/:roomId/recordings/:recordingId/stop', requireAdmin('recordings:manage'), requireCsrf, (req, res, next) => {
+    stopRecording({
+      roomId: req.params.roomId,
+      recordingId: req.params.recordingId,
+    }).then((result) => res.json(result)).catch(next)
+  })
+
+  router.get('/rooms/:roomId/recordings/:recordingId/media', requireAdmin('recordings:playback'), (req, res, next) => {
+    const coordinates = recordingStorageCoordinates(req.params.roomId, req.params.recordingId)
+    if (coordinates.source !== 'livekit_egress' || coordinates.status !== 'finalized' || !coordinates.storageKey) {
+      res.status(404).json({ error: 'recording_media_not_found', message: 'Recording media is not available.' })
+      return
+    }
+    recordAuditEvent({
+      actorType: 'admin',
+      actorId: req.admin.user.id,
+      action: 'recording.media_accessed',
+      resourceType: 'recording_artifact',
+      resourceId: req.params.recordingId,
+      roomId: req.params.roomId,
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+    })
+    openRecordingMedia(coordinates.storageKey).then((media) => {
+      if (media.redirectUrl) {
+        res.redirect(302, media.redirectUrl)
+        return
+      }
+      res.setHeader('Content-Type', 'video/mp4')
+      if (media.byteSize) res.setHeader('Content-Length', media.byteSize)
+      media.stream.pipe(res)
+    }).catch(next)
+  })
+
+  router.post('/rooms/:roomId/recordings/:recordingId/transcribe', requireAdmin('recordings:manage'), requireCsrf, (req, res, next) => {
+    retryTranscription({
+      roomId: req.params.roomId,
+      recordingId: req.params.recordingId,
+    }).then((artifactId) => res.status(202).json({ transcriptArtifactId: artifactId })).catch(next)
+  })
+
   router.get('/rooms/:roomId/recordings', requireAdmin('recordings:view'), (req, res) => {
     res.json(listRoomRecordings({
       roomId: req.params.roomId,
@@ -1203,6 +1300,74 @@ export function createAdminRouter({ isProduction, clientIp, onRoomEnded }) {
       })
     })
   })
+
+  // Cross-room artifact lists for the global admin pages.
+  router.get('/recordings', requireAdmin('recordings:view'), (req, res) => {
+    recordAuditEvent({
+      actorType: 'admin',
+      actorId: req.admin.user.id,
+      action: 'recording.viewed',
+      resourceType: 'recording_artifact',
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+      metadata: { scope: 'global', limit: boundedLimit(req.query.limit) },
+    })
+    res.json({ recordings: listAllRecordings({ limit: req.query.limit }) })
+  })
+
+  router.get('/transcripts', requireAdmin('transcripts:view'), (req, res) => {
+    recordAuditEvent({
+      actorType: 'admin',
+      actorId: req.admin.user.id,
+      action: 'transcript.viewed',
+      resourceType: 'transcript_artifact',
+      ip: clientIp(req),
+      userAgent: req.get('user-agent'),
+      metadata: { scope: 'global', limit: boundedLimit(req.query.limit) },
+    })
+    res.json({ transcripts: listAllTranscripts({ limit: req.query.limit }) })
+  })
+
+  // ---- Interactive API docs (TASK-0090) ------------------------------------
+  // Admin-gated Swagger UI served from the local swagger-ui-dist package (no
+  // CDN — CSP allows only 'self' scripts). The stock inline initializer is
+  // replaced by /docs/swagger-initializer.js below, registered BEFORE the
+  // static middleware so it shadows the file inside the package.
+  const swaggerInitializer = `window.onload = () => {
+  window.ui = SwaggerUIBundle({
+    url: '/api/admin/docs/openapi.json',
+    dom_id: '#swagger-ui',
+    presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+    layout: 'StandaloneLayout',
+    docExpansion: 'none',
+    tryItOutEnabled: true,
+    persistAuthorization: true,
+    withCredentials: true,
+    displayRequestDuration: true,
+  })
+}
+`
+
+  router.get('/docs', requireAdmin(), (req, res, next) => {
+    // Trailing slash keeps the UI's relative asset URLs working. This route
+    // also matches '/docs/' (non-strict routing), so fall through to the
+    // static index in that case instead of redirect-looping.
+    if (req.originalUrl.split('?')[0].endsWith('/')) {
+      next()
+      return
+    }
+    res.redirect(302, '/api/admin/docs/')
+  })
+
+  router.get('/docs/openapi.json', requireAdmin(), (_req, res) => {
+    res.json(openApiSpec)
+  })
+
+  router.get('/docs/swagger-initializer.js', requireAdmin(), (_req, res) => {
+    res.type('application/javascript').send(swaggerInitializer)
+  })
+
+  router.use('/docs', requireAdmin(), express.static(swaggerUiDist.getAbsoluteFSPath()))
 
   router.get('/audit', requireAdmin('audit:view'), (req, res) => {
     recordAuditEvent({

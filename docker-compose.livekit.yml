@@ -1,0 +1,33 @@
+# Local media plane for development: LiveKit server + egress worker.
+#   docker compose -f docker-compose.livekit.yml up
+# Pair with the app via .env (see .env.example): WEBRTC_LIVEKIT_URL=ws://127.0.0.1:7880
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"     # websocket / http
+      - "7881:7881"     # rtc tcp
+      - "50000-50100:50000-50100/udp"  # rtc udp
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  egress:
+    image: livekit/egress:latest
+    environment:
+      - EGRESS_CONFIG_FILE=/etc/egress.yaml
+    volumes:
+      - ./livekit/egress.yaml:/etc/egress.yaml:ro
+      # Local storage mode: egress writes under /out, which is the app's
+      # data/recordings folder (WEBRTC_EGRESS_LOCAL_PREFIX=/out).
+      - ./data/recordings:/out
+    depends_on:
+      - redis
+      - livekit
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

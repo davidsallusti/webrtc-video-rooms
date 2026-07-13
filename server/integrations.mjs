@@ -2,6 +2,7 @@ import express from 'express'
 import {
   authenticateIntegrationClient,
   integrationCreateRoom,
+  integrationRoomStatus,
   recordAuditEvent,
   requireIntegrationScope,
 } from './store.mjs'
@@ -66,6 +67,11 @@ export function createIntegrationRouter({ clientIp }) {
         displayName: req.body?.displayName,
         password: req.body?.password,
         metadata: req.body?.metadata,
+        schedule: req.body?.schedule,
+        invitees: req.body?.invitees,
+        candidateId: req.body?.candidateId,
+        recruiterId: req.body?.recruiterId,
+        maxParticipants: req.body?.maxParticipants,
         externalLink: req.body?.externalLink,
         externalIdentity: req.body?.externalIdentity,
         origin: '',
@@ -73,6 +79,18 @@ export function createIntegrationRouter({ clientIp }) {
         userAgent: req.get('user-agent'),
       })
       res.status(201).json(result)
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // Room status for the portal: occupancy, lifecycle, schedule, artifacts
+  // summary. Read-only; requires the rooms:create scope's sibling read.
+  router.get('/rooms/:roomId', (req, res, next) => {
+    try {
+      requireIntegrationScope(req.integration.client, 'rooms:read')
+      const status = integrationRoomStatus({ roomId: req.params.roomId, client: req.integration.client })
+      res.json(status)
     } catch (error) {
       next(error)
     }

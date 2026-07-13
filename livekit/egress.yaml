@@ -1,0 +1,8 @@
+# Local development egress config: writes composite recordings to /out,
+# which docker-compose mounts onto the app's data/recordings folder.
+redis:
+  address: redis:6379
+api_key: webrtc-app
+api_secret: local-dev-secret-change-me-0088
+ws_url: ws://livekit:7880
+insecure: true

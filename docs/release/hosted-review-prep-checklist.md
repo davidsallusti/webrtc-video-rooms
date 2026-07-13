@@ -121,7 +121,7 @@ rm -f /tmp/webrtc-hosted-review-prep.sqlite
 
 - Delete the temporary review service after acceptance or timeout.
 - Remove any environment variables from the provider dashboard.
-- Confirm the temporary URL no longer serves `/`, `/api/health`, `/embed/*`, `/api/admin/*`, `/api/integrations/*`, or `/ws/signaling`.
+- Confirm the temporary URL no longer serves `/`, `/api/health`, `/embed/*`, `/api/admin/*`, `/api/integrations/*`, `/api/portal/*`, or `/api/livekit/webhooks`.
 - Record the service name, URL, commit, deploy ID, cleanup date, and owner in the release handoff without secret values.
 - Do not leave paid resources, persistent disks, managed databases, buckets, TURN/SFU allocations, callback endpoints, or monitoring vendors running.
 

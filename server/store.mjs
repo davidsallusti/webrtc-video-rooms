@@ -66,9 +66,17 @@ addColumnIfMissing('rooms', 'last_lifecycle_reason', 'text')
 addColumnIfMissing('rooms', 'chat_retention_pending', 'integer not null default 0')
 addColumnIfMissing('rooms', 'transcript_pending', 'integer not null default 0')
 addColumnIfMissing('rooms', 'recording_pending', 'integer not null default 0')
+addColumnIfMissing('rooms', 'scheduled_start_at', 'text')
+addColumnIfMissing('rooms', 'scheduled_end_at', 'text')
+addColumnIfMissing('rooms', 'join_window_minutes', 'integer')
+addColumnIfMissing('rooms', 'candidate_id', 'text')
+addColumnIfMissing('rooms', 'recruiter_id', 'text')
+addColumnIfMissing('rooms', 'livekit_room_name', 'text')
 addColumnIfMissing('room_access_tokens', 'admission_status', "text not null default 'admitted'")
 addColumnIfMissing('room_access_tokens', 'admission_decided_at', 'text')
 addColumnIfMissing('room_access_tokens', 'admission_decided_by', 'text')
+addColumnIfMissing('room_access_tokens', 'email', 'text')
+addColumnIfMissing('room_access_tokens', 'display_name', 'text')
 
 db.exec(`
   create table if not exists admin_users (
@@ -306,7 +314,7 @@ db.exec(`
     id text primary key,
     room_id text not null references rooms(id),
     provider_key text not null,
-    source text not null check(source in ('mock')),
+    source text not null check(source in ('mock','recording_stt')),
     status text not null check(status in ('draft','active','finalized','failed','deleted')),
     language text not null default 'en',
     started_at text,
@@ -363,8 +371,8 @@ db.exec(`
   create table if not exists recording_artifacts (
     id text primary key,
     room_id text not null references rooms(id),
-    source text not null check(source in ('mock_metadata')),
-    status text not null check(status in ('mock_active','mock_finalized','mock_failed','deleted')),
+    source text not null check(source in ('mock_metadata','livekit_egress')),
+    status text not null check(status in ('mock_active','mock_finalized','mock_failed','active','finalized','failed','deleted')),
     storage_provider text not null default 'none',
     storage_key text,
     byte_size integer not null default 0,
@@ -389,6 +397,16 @@ db.exec(`
     actor_id text,
     metadata_json text not null default '{}',
     created_at text not null
+  );
+
+  create table if not exists room_invitees (
+    id text primary key,
+    room_id text not null references rooms(id),
+    email text not null,
+    display_name text,
+    invitee_role text not null default 'participant',
+    created_at text not null,
+    unique(room_id, email)
   );
 
   create table if not exists room_embed_settings (
@@ -439,10 +457,90 @@ db.exec(`
   create index if not exists embed_sessions_room_created_idx on embed_sessions(room_id, created_at);
   create index if not exists embed_sessions_room_origin_idx on embed_sessions(room_id, allowed_origin);
   create index if not exists embed_origin_events_room_created_idx on embed_origin_events(room_id, created_at);
+  create index if not exists room_invitees_room_email_idx on room_invitees(room_id, email);
 `)
 
 addColumnIfMissing('integration_clients', 'system_key', 'text')
 addColumnIfMissing('room_chat_settings', 'retention_days', 'integer not null default 7')
+
+// SQLite cannot alter CHECK constraints in place. Databases created before real
+// recording/transcript sources existed still carry the mock-only enums, so those
+// two tables are rebuilt once (SQLite ALTER TABLE recipe: new table, copy, swap).
+function rebuildTableForCheck(tableName, checkMarker, indexSql) {
+  const current = db.prepare("select sql from sqlite_master where type = 'table' and name = ?").get(tableName)?.sql || ''
+  if (!current || current.includes(checkMarker)) return
+  const freshSql = db.prepare("select sql from sqlite_master where type = 'table' and name = ?").get(`${tableName}__new`)?.sql
+  if (freshSql) db.exec(`drop table ${tableName}__new`)
+  const createNewSql = currentCreateSqlFor(tableName).replace(`${tableName} (`, `${tableName}__new (`)
+  db.exec('pragma foreign_keys = off')
+  db.exec('begin')
+  try {
+    db.exec(createNewSql)
+    const columns = [...columnNames(tableName)].join(', ')
+    db.exec(`insert into ${tableName}__new (${columns}) select ${columns} from ${tableName}`)
+    db.exec(`drop table ${tableName}`)
+    db.exec(`alter table ${tableName}__new rename to ${tableName}`)
+    db.exec(indexSql)
+    db.exec('commit')
+  } catch (error) {
+    db.exec('rollback')
+    throw error
+  } finally {
+    db.exec('pragma foreign_keys = on')
+  }
+}
+
+// Canonical (current) create statements for rebuildable tables, kept in one place
+// so the rebuild always mirrors the schema block above.
+function currentCreateSqlFor(tableName) {
+  const statements = {
+    transcript_artifacts: `create table transcript_artifacts (
+      id text primary key,
+      room_id text not null references rooms(id),
+      provider_key text not null,
+      source text not null check(source in ('mock','recording_stt')),
+      status text not null check(status in ('draft','active','finalized','failed','deleted')),
+      language text not null default 'en',
+      started_at text,
+      finalized_at text,
+      retention_expires_at text,
+      deleted_at text,
+      deleted_by_admin_user_id text,
+      metadata_json text not null default '{}',
+      created_at text not null,
+      updated_at text not null
+    )`,
+    recording_artifacts: `create table recording_artifacts (
+      id text primary key,
+      room_id text not null references rooms(id),
+      source text not null check(source in ('mock_metadata','livekit_egress')),
+      status text not null check(status in ('mock_active','mock_finalized','mock_failed','active','finalized','failed','deleted')),
+      storage_provider text not null default 'none',
+      storage_key text,
+      byte_size integer not null default 0,
+      duration_ms integer,
+      started_at text,
+      finalized_at text,
+      retention_expires_at text,
+      deleted_at text,
+      deleted_by_admin_user_id text,
+      failure_reason text,
+      metadata_json text not null default '{}',
+      created_at text not null,
+      updated_at text not null
+    )`,
+  }
+  return statements[tableName]
+}
+
+rebuildTableForCheck('transcript_artifacts', "'recording_stt'", `
+  create index if not exists transcript_artifacts_room_created_idx on transcript_artifacts(room_id, created_at);
+  create index if not exists transcript_artifacts_room_status_idx on transcript_artifacts(room_id, status);
+`)
+rebuildTableForCheck('recording_artifacts', "'livekit_egress'", `
+  create index if not exists recording_artifacts_room_created_idx on recording_artifacts(room_id, created_at);
+  create index if not exists recording_artifacts_room_status_idx on recording_artifacts(room_id, status);
+`)
 
 const passwordAttempts = new Map()
 const chatAttempts = new Map()
@@ -454,6 +552,15 @@ const chatAttemptWindowMs = readLimit('WEBRTC_CHAT_MESSAGE_WINDOW_MS', 60_000)
 const transcriptAttemptLimit = readLimit('WEBRTC_TRANSCRIPT_SEGMENT_LIMIT', 20)
 const transcriptAttemptWindowMs = readLimit('WEBRTC_TRANSCRIPT_SEGMENT_WINDOW_MS', 60_000)
 const roomTtlHours = readLimit('WEBRTC_ROOM_TTL_HOURS', 24)
+// How long a scheduled room stays joinable past its slot end (interviews overrun).
+const scheduleOverrunGraceMinutes = readLimit('WEBRTC_SCHEDULE_OVERRUN_GRACE_MINUTES', 120)
+const maxParticipantsCeiling = readLimit('WEBRTC_MAX_PARTICIPANTS_CEILING', 5)
+
+function clampMaxParticipants(value) {
+  const count = Number(value)
+  if (!Number.isInteger(count)) return 2
+  return Math.min(Math.max(count, 2), maxParticipantsCeiling)
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -509,6 +616,10 @@ function publicRoomView(room) {
     endedAt: room.ended_at,
     waitingRoomEnabled: Boolean(room.waiting_room_enabled),
     autoAdmitFirstGuest: Boolean(room.auto_admit_first_guest),
+    scheduledStartAt: room.scheduled_start_at,
+    scheduledEndAt: room.scheduled_end_at,
+    joinWindowMinutes: room.join_window_minutes,
+    inviteeOnly: roomHasInvitees(room.id),
   }
 }
 
@@ -531,6 +642,13 @@ function adminRoomView(room) {
     chatRetentionPending: Boolean(room.chat_retention_pending),
     transcriptPending: Boolean(room.transcript_pending),
     recordingPending: Boolean(room.recording_pending),
+    scheduledStartAt: room.scheduled_start_at,
+    scheduledEndAt: room.scheduled_end_at,
+    joinWindowMinutes: room.join_window_minutes,
+    candidateId: room.candidate_id,
+    recruiterId: room.recruiter_id,
+    livekitRoomName: room.livekit_room_name,
+    invitees: listRoomInvitees(room.id),
     metadata,
   }
 }
@@ -557,7 +675,34 @@ export function getRoom(roomId) {
   return db.prepare('select * from rooms where id = ?').get(roomId)
 }
 
-function assertRoomJoinable(room) {
+// Resolve the app room behind a LiveKit room name (portal tokens carry the
+// LiveKit name, not our room id). Newest active room wins on collisions.
+export function findRoomByLivekitName(livekitRoomName) {
+  if (!livekitRoomName) return null
+  return db.prepare(`
+    select * from rooms
+    where livekit_room_name = ? and status = 'active'
+    order by created_at desc
+    limit 1
+  `).get(livekitRoomName) || null
+}
+
+// Occupancy from the presence table (fed by LiveKit webhooks).
+export function connectedParticipantCount(roomId) {
+  return db.prepare(`
+    select count(*) as count from room_presence
+    where room_id = ? and disconnected_at is null
+  `).get(roomId).count
+}
+
+export function markAllDisconnected(roomId) {
+  db.prepare(`
+    update room_presence set disconnected_at = ?, last_seen_at = ?
+    where room_id = ? and disconnected_at is null
+  `).run(nowIso(), nowIso(), roomId)
+}
+
+function assertRoomJoinable(room, { bypassJoinWindow = false } = {}) {
   if (!room) {
     const error = new Error('Room not found')
     error.code = 'room_not_found'
@@ -575,6 +720,19 @@ function assertRoomJoinable(room) {
     error.code = 'room_expired'
     error.status = 410
     throw error
+  }
+  // Scheduled rooms only open join_window_minutes before their start. Hosts and
+  // admins bypass; late joins stay allowed until the room expires (interviews
+  // running over must not lock people out on reconnect).
+  if (!bypassJoinWindow && room.scheduled_start_at && room.join_window_minutes != null) {
+    const opensAtMs = Date.parse(room.scheduled_start_at) - room.join_window_minutes * 60_000
+    if (Number.isFinite(opensAtMs) && Date.now() < opensAtMs) {
+      const error = new Error('This room is not open yet.')
+      error.code = 'room_not_open'
+      error.status = 403
+      error.opensAt = new Date(opensAtMs).toISOString()
+      throw error
+    }
   }
 }
 
@@ -1507,6 +1665,37 @@ function recordingConsentState(settings, participantId) {
   return consent?.status || 'notice_required'
 }
 
+// Acknowledge-to-enter: recorded rooms refuse media credentials until the
+// participant has acknowledged the current recording notice.
+export function assertRecordingConsentForJoin(roomId, participantId) {
+  const settings = ensureRoomRecordingSettings(roomId)
+  const state = recordingConsentState(settings, participantId)
+  if (state === 'not_required' || state === 'acknowledged') return
+  const error = new Error('This room is recorded. Acknowledge the recording notice to join.')
+  error.code = 'recording_consent_required'
+  error.status = 403
+  error.notice = settings.participant_notice
+  throw error
+}
+
+// Record consent directly (portal join path: the caller sends an explicit
+// acknowledgement flag with the portal token; there is no notice UI of ours).
+export function recordConsentDirect({ roomId, participantId, accessTokenValue, status }) {
+  const settings = ensureRoomRecordingSettings(roomId)
+  if (!settings.recording_enabled) return
+  const ts = nowIso()
+  db.prepare(`
+    insert into participant_recording_consents (
+      id, room_id, participant_id, access_token_hash, status, notice_version, created_at, updated_at
+    )
+    values (?, ?, ?, ?, ?, ?, ?, ?)
+    on conflict(room_id, participant_id, notice_version) do update set
+      status = excluded.status,
+      access_token_hash = excluded.access_token_hash,
+      updated_at = excluded.updated_at
+  `).run(randomId(12), roomId, participantId, accessTokenValue ? tokenHash(accessTokenValue) : null, status, settings.notice_version, ts, ts)
+}
+
 function requireRecordingEnabled(settings) {
   if (!settings.recording_enabled) {
     const error = new Error('Recording metadata is disabled for this room.')
@@ -1542,7 +1731,7 @@ function recordingArtifactProjection(row) {
     roomId: row.room_id,
     source: row.source,
     status: row.status,
-    storageProvider: 'none',
+    storageProvider: row.source === 'livekit_egress' ? row.storage_provider : 'none',
     byteSize: Number(row.byte_size || 0),
     durationMs: row.duration_ms,
     startedAt: row.started_at,
@@ -1552,7 +1741,8 @@ function recordingArtifactProjection(row) {
     failureReason: row.failure_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    mediaCaptured: false,
+    // Storage keys stay server-side; playback goes through the media endpoint.
+    mediaCaptured: row.source === 'livekit_egress' && row.status === 'finalized' && Boolean(row.storage_key),
   }
 }
 
@@ -1767,6 +1957,259 @@ export function failMockRecording({ roomId, recordingId, actorId, reason, ip, us
   return recordingArtifactProjection(requireRecordingArtifact(roomId, recordingId))
 }
 
+// ---- Real (LiveKit egress) recordings -------------------------------------
+// Same artifact table as the mocks; source='livekit_egress' rows carry real
+// storage coordinates. Orchestration (egress API calls, STT) lives in
+// recordings.mjs — these functions only own the database transitions.
+
+export function createEgressRecordingArtifact({ roomId, storageProvider, storageKey, actorType = 'admin', actorId, ip, userAgent }) {
+  assertRoomCanRecord(roomId)
+  const settings = ensureRoomRecordingSettings(roomId)
+  requireRecordingEnabled(settings)
+  const active = db.prepare(`
+    select id from recording_artifacts
+    where room_id = ? and status in ('active', 'mock_active') and deleted_at is null
+    limit 1
+  `).get(roomId)
+  if (active) {
+    const error = new Error('A recording is already in progress for this room.')
+    error.code = 'recording_already_active'
+    error.status = 409
+    throw error
+  }
+  const id = randomId(12)
+  const ts = nowIso()
+  db.prepare(`
+    insert into recording_artifacts (
+      id, room_id, source, status, storage_provider, storage_key, byte_size,
+      started_at, retention_expires_at, metadata_json, created_at, updated_at
+    )
+    values (?, ?, 'livekit_egress', 'active', ?, ?, 0, ?, ?, '{}', ?, ?)
+  `).run(id, roomId, storageProvider, storageKey, ts, recordingRetentionExpiry(settings), ts, ts)
+  recordRecordingArtifactEvent({ artifactId: id, roomId, action: 'recording.started', actorType, actorId, metadata: { storageProvider } })
+  recordAuditEvent({
+    actorType,
+    actorId,
+    action: 'recording.started',
+    resourceType: 'recording_artifact',
+    resourceId: id,
+    roomId,
+    ip,
+    userAgent,
+    metadata: { source: 'livekit_egress', storageProvider },
+  })
+  return recordingArtifactProjection(requireRecordingArtifact(roomId, id))
+}
+
+export function attachStorageKeyToRecording(roomId, recordingId, storageKey) {
+  requireRecordingArtifact(roomId, recordingId)
+  db.prepare('update recording_artifacts set storage_key = ?, updated_at = ? where id = ?')
+    .run(storageKey, nowIso(), recordingId)
+}
+
+export function attachEgressToRecording({ roomId, recordingId, egressId }) {
+  const artifact = requireRecordingArtifact(roomId, recordingId)
+  const metadata = parseJsonObject(artifact.metadata_json, {})
+  metadata.egressId = egressId
+  db.prepare('update recording_artifacts set metadata_json = ?, updated_at = ? where id = ?')
+    .run(JSON.stringify(metadata), nowIso(), recordingId)
+}
+
+export function findRecordingByEgressId(egressId) {
+  if (!egressId) return null
+  return db.prepare(`
+    select * from recording_artifacts
+    where source = 'livekit_egress' and metadata_json like ?
+    order by created_at desc
+    limit 1
+  `).get(`%"egressId":${JSON.stringify(String(egressId))}%`) || null
+}
+
+export function findActiveEgressRecording(roomId) {
+  return db.prepare(`
+    select * from recording_artifacts
+    where room_id = ? and source = 'livekit_egress' and status = 'active' and deleted_at is null
+    order by created_at desc
+    limit 1
+  `).get(roomId) || null
+}
+
+export function finalizeEgressRecording({ roomId, recordingId, byteSize, durationMs, actorType = 'system', actorId = 'livekit-webhook' }) {
+  const artifact = requireRecordingArtifact(roomId, recordingId)
+  if (artifact.status !== 'active') {
+    const error = new Error('Recording artifact is not active.')
+    error.code = 'recording_not_active'
+    error.status = 409
+    throw error
+  }
+  const ts = nowIso()
+  db.prepare(`
+    update recording_artifacts
+    set status = 'finalized', finalized_at = ?, byte_size = ?, duration_ms = ?, updated_at = ?
+    where room_id = ? and id = ?
+  `).run(ts, Math.max(0, Number(byteSize || 0)), Math.max(0, Number(durationMs || 0)), ts, roomId, recordingId)
+  recordRecordingArtifactEvent({ artifactId: recordingId, roomId, action: 'recording.finalized', actorType, actorId, metadata: { byteSize: Number(byteSize || 0), durationMs: Number(durationMs || 0) } })
+  recordAuditEvent({
+    actorType,
+    actorId,
+    action: 'recording.finalized',
+    resourceType: 'recording_artifact',
+    resourceId: recordingId,
+    roomId,
+    metadata: { byteSize: Number(byteSize || 0), durationMs: Number(durationMs || 0) },
+  })
+  return recordingArtifactProjection(requireRecordingArtifact(roomId, recordingId))
+}
+
+export function failEgressRecording({ roomId, recordingId, reason, actorType = 'system', actorId = 'livekit-webhook' }) {
+  const artifact = requireRecordingArtifact(roomId, recordingId)
+  if (artifact.status !== 'active') return recordingArtifactProjection(artifact)
+  const ts = nowIso()
+  const failureReason = String(reason || 'egress_failed').trim().slice(0, 120) || 'egress_failed'
+  db.prepare(`
+    update recording_artifacts
+    set status = 'failed', failure_reason = ?, updated_at = ?
+    where room_id = ? and id = ?
+  `).run(failureReason, ts, roomId, recordingId)
+  recordRecordingArtifactEvent({ artifactId: recordingId, roomId, action: 'recording.failed', actorType, actorId, metadata: { reason: failureReason } })
+  recordAuditEvent({
+    actorType,
+    actorId,
+    action: 'recording.failed',
+    resourceType: 'recording_artifact',
+    resourceId: recordingId,
+    roomId,
+    metadata: { reason: failureReason },
+  })
+  return recordingArtifactProjection(requireRecordingArtifact(roomId, recordingId))
+}
+
+export function recordingStorageCoordinates(roomId, recordingId) {
+  const artifact = requireRecordingArtifact(roomId, recordingId)
+  return { storageProvider: artifact.storage_provider, storageKey: artifact.storage_key, status: artifact.status, source: artifact.source }
+}
+
+// ---- Post-call STT transcript artifacts ------------------------------------
+
+export function createRecordingTranscriptArtifact({ roomId, recordingId, providerKey, language = 'en' }) {
+  ensureRoomTranscriptSettings(roomId)
+  const id = randomId(12)
+  const ts = nowIso()
+  const settings = ensureRoomTranscriptSettings(roomId)
+  db.prepare(`
+    insert into transcript_artifacts (
+      id, room_id, provider_key, source, status, language, started_at, retention_expires_at,
+      metadata_json, created_at, updated_at
+    )
+    values (?, ?, ?, 'recording_stt', 'active', ?, ?, ?, ?, ?, ?)
+  `).run(id, roomId, providerKey, language, ts, transcriptRetentionExpiry(settings), JSON.stringify({ recordingId }), ts, ts)
+  recordAuditEvent({
+    actorType: 'system',
+    actorId: 'stt-pipeline',
+    action: 'transcript.stt_started',
+    resourceType: 'transcript_artifact',
+    resourceId: id,
+    roomId,
+    metadata: { providerKey, recordingId },
+  })
+  return id
+}
+
+export function appendTranscriptSegments({ roomId, artifactId, segments }) {
+  const ts = nowIso()
+  const insert = db.prepare(`
+    insert into transcript_segments (
+      id, artifact_id, room_id, participant_id, speaker_label, start_ms, end_ms, text, confidence, is_final, created_at
+    )
+    values (?, ?, ?, null, ?, ?, ?, ?, null, 1, ?)
+  `)
+  for (const segment of segments) {
+    const text = String(segment.text || '').trim().slice(0, 2000)
+    if (!text) continue
+    insert.run(
+      randomId(12),
+      artifactId,
+      roomId,
+      String(segment.speakerLabel || '').slice(0, 80) || null,
+      Math.max(0, Math.round(Number(segment.startMs || 0))),
+      Math.max(0, Math.round(Number(segment.endMs || 0))),
+      text,
+      ts,
+    )
+  }
+}
+
+export function finalizeTranscriptArtifact({ roomId, artifactId, language }) {
+  const ts = nowIso()
+  db.prepare(`
+    update transcript_artifacts
+    set status = 'finalized', finalized_at = ?, language = coalesce(?, language), updated_at = ?
+    where room_id = ? and id = ?
+  `).run(ts, language || null, ts, roomId, artifactId)
+  recordAuditEvent({
+    actorType: 'system',
+    actorId: 'stt-pipeline',
+    action: 'transcript.stt_finalized',
+    resourceType: 'transcript_artifact',
+    resourceId: artifactId,
+    roomId,
+  })
+}
+
+export function failTranscriptArtifact({ roomId, artifactId, reason }) {
+  const ts = nowIso()
+  const metadata = parseJsonObject(db.prepare('select metadata_json from transcript_artifacts where id = ?').get(artifactId)?.metadata_json, {})
+  metadata.failureReason = String(reason || 'stt_failed').slice(0, 200)
+  db.prepare(`
+    update transcript_artifacts
+    set status = 'failed', metadata_json = ?, updated_at = ?
+    where room_id = ? and id = ?
+  `).run(JSON.stringify(metadata), ts, roomId, artifactId)
+  recordAuditEvent({
+    actorType: 'system',
+    actorId: 'stt-pipeline',
+    action: 'transcript.stt_failed',
+    resourceType: 'transcript_artifact',
+    resourceId: artifactId,
+    roomId,
+    metadata: { reason: metadata.failureReason },
+  })
+}
+
+// Cross-room artifact lists for the admin "Recordings"/"Transcripts" pages.
+// Read-only projections joined with the owning room's display fields.
+export function listAllRecordings({ limit = 100 } = {}) {
+  const capped = Math.max(1, Math.min(200, Number(limit || 100)))
+  return db.prepare(`
+    select recording_artifacts.*, rooms.display_name as room_display_name, rooms.candidate_id as room_candidate_id
+    from recording_artifacts
+    join rooms on rooms.id = recording_artifacts.room_id
+    where recording_artifacts.status != 'deleted'
+    order by recording_artifacts.created_at desc
+    limit ?
+  `).all(capped).map((row) => ({
+    ...recordingArtifactProjection(row),
+    roomDisplayName: row.room_display_name,
+    candidateId: row.room_candidate_id,
+  }))
+}
+
+export function listAllTranscripts({ limit = 100 } = {}) {
+  const capped = Math.max(1, Math.min(200, Number(limit || 100)))
+  return db.prepare(`
+    select transcript_artifacts.*, rooms.display_name as room_display_name, rooms.candidate_id as room_candidate_id
+    from transcript_artifacts
+    join rooms on rooms.id = transcript_artifacts.room_id
+    where transcript_artifacts.status != 'deleted'
+    order by transcript_artifacts.created_at desc
+    limit ?
+  `).all(capped).map((row) => ({
+    ...transcriptArtifactProjection(row, { includeMetadata: true }),
+    roomDisplayName: row.room_display_name,
+    candidateId: row.room_candidate_id,
+  }))
+}
+
 export function listRoomRecordings({ roomId, actorId, ip, userAgent, limit = 50 }) {
   ensureRoomRecordingSettings(roomId)
   const capped = Math.max(1, Math.min(100, Number(limit || 50)))
@@ -1831,6 +2274,7 @@ export function deleteRecordingArtifact({ roomId, recordingId, actorId, ip, user
 
 const allowedEmbedScopes = new Set(['embed:status', 'embed:join'])
 const embedSessionTtlMs = readLimit('WEBRTC_EMBED_SESSION_TTL_MS', 10 * 60_000)
+const embedRemoteOriginsAllowed = process.env.WEBRTC_EMBED_ALLOW_REMOTE_ORIGINS === '1'
 
 function normalizeLocalEmbedOrigin(origin) {
   let parsed
@@ -1848,8 +2292,11 @@ function normalizeLocalEmbedOrigin(origin) {
     error.status = 400
     throw error
   }
-  if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-    const error = new Error('Only explicit local embed origins are approved in this slice.')
+  const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+  // Remote embed origins (the deployed portal) require https and the explicit
+  // deployment opt-in; local development stays localhost-only by default.
+  if (!isLocal && !(embedRemoteOriginsAllowed && parsed.protocol === 'https:')) {
+    const error = new Error('Embed origin must be local, or a https origin with WEBRTC_EMBED_ALLOW_REMOTE_ORIGINS=1 set.')
     error.code = 'invalid_embed_origin'
     error.status = 400
     throw error
@@ -2159,6 +2606,138 @@ function normalizeRoomMetadata(metadata) {
   return normalized
 }
 
+const inviteeRoles = new Set(['candidate', 'recruiter', 'interviewer', 'observer', 'participant'])
+const inviteeLimit = 16
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+export function normalizeInviteeEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase().slice(0, 254)
+  return emailPattern.test(normalized) ? normalized : ''
+}
+
+function normalizeInvitees(invitees) {
+  if (!Array.isArray(invitees)) return []
+  const seen = new Map()
+  for (const entry of invitees.slice(0, inviteeLimit * 2)) {
+    const email = normalizeInviteeEmail(typeof entry === 'string' ? entry : entry?.email)
+    if (!email || seen.has(email)) continue
+    const role = String(entry?.inviteeRole || entry?.role || '').trim().toLowerCase()
+    seen.set(email, {
+      email,
+      displayName: String(entry?.displayName || '').trim().slice(0, 120),
+      inviteeRole: inviteeRoles.has(role) ? role : 'participant',
+    })
+    if (seen.size >= inviteeLimit) break
+  }
+  return [...seen.values()]
+}
+
+function normalizeExternalId(value, code) {
+  const id = String(value || '').trim().slice(0, 96)
+  if (!id) return null
+  if (!/^[a-zA-Z0-9_.:-]+$/.test(id)) {
+    const error = new Error('Identifier may only contain letters, numbers, and _.:- characters.')
+    error.code = code
+    error.status = 400
+    throw error
+  }
+  return id
+}
+
+function normalizeSchedule(schedule) {
+  if (!schedule || typeof schedule !== 'object') return { scheduledStartAt: null, scheduledEndAt: null, joinWindowMinutes: null }
+  const parseIso = (value, code) => {
+    if (!value) return null
+    const timestamp = Date.parse(value)
+    if (!Number.isFinite(timestamp)) {
+      const error = new Error('Schedule timestamps must be valid ISO dates.')
+      error.code = code
+      error.status = 400
+      throw error
+    }
+    return new Date(timestamp).toISOString()
+  }
+  const scheduledStartAt = parseIso(schedule.scheduledStartAt, 'invalid_schedule_start')
+  const scheduledEndAt = parseIso(schedule.scheduledEndAt, 'invalid_schedule_end')
+  if (scheduledEndAt && (!scheduledStartAt || Date.parse(scheduledEndAt) <= Date.parse(scheduledStartAt))) {
+    const error = new Error('Schedule end must come after the schedule start.')
+    error.code = 'invalid_schedule_range'
+    error.status = 400
+    throw error
+  }
+  let joinWindowMinutes = null
+  if (schedule.joinWindowMinutes != null) {
+    joinWindowMinutes = Number(schedule.joinWindowMinutes)
+    if (!Number.isInteger(joinWindowMinutes) || joinWindowMinutes < 0 || joinWindowMinutes > 24 * 60) {
+      const error = new Error('Join window must be between 0 and 1440 minutes.')
+      error.code = 'invalid_join_window'
+      error.status = 400
+      throw error
+    }
+    if (!scheduledStartAt) {
+      const error = new Error('A join window requires a scheduled start time.')
+      error.code = 'invalid_join_window'
+      error.status = 400
+      throw error
+    }
+  }
+  return { scheduledStartAt, scheduledEndAt, joinWindowMinutes }
+}
+
+// Mirrors HirePortal's liveKitRoomName() EXACTLY — lowercase, alphanumeric
+// only, and the 40-char cap applied to the full prefixed string — so a
+// portal-minted token and our own tokens land participants in the same
+// LiveKit room for a given candidate.
+export function livekitRoomNameFor(roomId, candidateId) {
+  if (candidateId) return `hp-${String(candidateId).replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}`.slice(0, 40)
+  return `room-${roomId}`
+}
+
+function roomHasInvitees(roomId) {
+  return Boolean(db.prepare('select 1 from room_invitees where room_id = ? limit 1').get(roomId))
+}
+
+export function listRoomInvitees(roomId) {
+  return db.prepare(`
+    select email, display_name as displayName, invitee_role as inviteeRole, created_at as createdAt
+    from room_invitees
+    where room_id = ?
+    order by created_at asc, email asc
+  `).all(roomId)
+}
+
+function replaceRoomInvitees(roomId, invitees, ts) {
+  db.prepare('delete from room_invitees where room_id = ?').run(roomId)
+  for (const invitee of invitees) {
+    db.prepare(`
+      insert into room_invitees (id, room_id, email, display_name, invitee_role, created_at)
+      values (?, ?, ?, ?, ?, ?)
+    `).run(randomId(), roomId, invitee.email, invitee.displayName || null, invitee.inviteeRole, ts)
+  }
+}
+
+export function findRoomInvitee(roomId, email) {
+  const normalized = normalizeInviteeEmail(email)
+  if (!normalized) return null
+  return db.prepare(`
+    select email, display_name as displayName, invitee_role as inviteeRole
+    from room_invitees
+    where room_id = ? and email = ?
+  `).get(roomId, normalized) || null
+}
+
+function requireInvitee(roomId, email, ip) {
+  const invitee = findRoomInvitee(roomId, email)
+  if (!invitee) {
+    recordPasswordFailure(roomId, ip)
+    const error = new Error('This room is limited to invited participants.')
+    error.code = 'not_invited'
+    error.status = 403
+    throw error
+  }
+  return invitee
+}
+
 function metadataTextIndex(metadata) {
   return Object.entries(metadata)
     .map(([key, value]) => `${key}:${Array.isArray(value) ? value.join(',') : value}`)
@@ -2320,7 +2899,19 @@ function validateFutureIso(value, code = 'invalid_expiry') {
   return new Date(timestamp).toISOString()
 }
 
-export function createRoom({ displayName, password, origin, metadata, actorType = 'participant', actorId = 'host-bootstrap' }) {
+export function createRoom({
+  displayName,
+  password,
+  origin,
+  metadata,
+  schedule,
+  invitees,
+  candidateId,
+  recruiterId,
+  maxParticipants,
+  actorType = 'participant',
+  actorId = 'host-bootstrap',
+}) {
   if (!password || String(password).length < 4) {
     const error = new Error('Room password must be at least 4 characters.')
     error.code = 'weak_password'
@@ -2330,15 +2921,26 @@ export function createRoom({ displayName, password, origin, metadata, actorType 
   const id = randomId(8)
   const salt = randomBytes(16).toString('base64url')
   const createdAt = nowIso()
-  const expiresAt = futureIso(roomTtlHours * 60 * 60 * 1000)
+  const { scheduledStartAt, scheduledEndAt, joinWindowMinutes } = normalizeSchedule(schedule)
+  // A scheduled slot overrides the generic TTL: the room stays joinable through
+  // the slot plus a fixed overrun grace, instead of 24h from creation.
+  const expiresAt = scheduledEndAt
+    ? new Date(Date.parse(scheduledEndAt) + scheduleOverrunGraceMinutes * 60_000).toISOString()
+    : futureIso(roomTtlHours * 60 * 60 * 1000)
+  const normalizedCandidateId = normalizeExternalId(candidateId, 'invalid_candidate_id')
+  const normalizedRecruiterId = normalizeExternalId(recruiterId, 'invalid_recruiter_id')
+  const normalizedInvitees = normalizeInvitees(invitees)
+  const participantCap = clampMaxParticipants(maxParticipants)
   const roomMetadata = normalizeRoomMetadata(metadata)
   db.prepare(`
     insert into rooms (
       id, display_name, password_hash, password_salt, created_at, expires_at,
       max_participants, status, waiting_room_enabled, auto_admit_first_guest,
-      metadata_json, metadata_text_index
+      metadata_json, metadata_text_index,
+      scheduled_start_at, scheduled_end_at, join_window_minutes,
+      candidate_id, recruiter_id, livekit_room_name
     )
-    values (?, ?, ?, ?, ?, ?, 2, 'active', 0, 1, ?, ?)
+    values (?, ?, ?, ?, ?, ?, ?, 'active', 0, 1, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     displayName || 'Untitled room',
@@ -2346,9 +2948,17 @@ export function createRoom({ displayName, password, origin, metadata, actorType 
     salt,
     createdAt,
     expiresAt,
+    participantCap,
     JSON.stringify(roomMetadata),
     metadataTextIndex(roomMetadata),
+    scheduledStartAt,
+    scheduledEndAt,
+    joinWindowMinutes,
+    normalizedCandidateId,
+    normalizedRecruiterId,
+    livekitRoomNameFor(id, normalizedCandidateId),
   )
+  replaceRoomInvitees(id, normalizedInvitees, createdAt)
   for (const [key, value] of Object.entries(roomMetadata)) {
     db.prepare(`
       insert into room_metadata (room_id, key, value_json, value_text_index, created_at, updated_at)
@@ -2383,27 +2993,87 @@ export function createRoom({ displayName, password, origin, metadata, actorType 
 
 export function getPublicRoom(roomId) {
   const room = getRoom(roomId)
-  assertRoomJoinable(room)
+  // Bypass the join window: the join page needs schedule info to render an
+  // "opens at" notice. The window is enforced where credentials are issued.
+  assertRoomJoinable(room, { bypassJoinWindow: true })
   return publicRoomView(room)
 }
 
-export function issueAccessToken({ roomId, role, admissionStatus = 'admitted' }) {
+export function updateRoomInterviewConfig({ roomId, schedule, invitees, candidateId, recruiterId, maxParticipants, actorType = 'admin', actorId, ip, userAgent }) {
+  return withTransaction(() => {
+    const room = requireRoom(roomId)
+    const ts = nowIso()
+    const updates = []
+    const values = []
+    const changed = {}
+    if (schedule !== undefined) {
+      const { scheduledStartAt, scheduledEndAt, joinWindowMinutes } = normalizeSchedule(schedule)
+      updates.push('scheduled_start_at = ?', 'scheduled_end_at = ?', 'join_window_minutes = ?')
+      values.push(scheduledStartAt, scheduledEndAt, joinWindowMinutes)
+      if (scheduledEndAt) {
+        updates.push('expires_at = ?')
+        values.push(new Date(Date.parse(scheduledEndAt) + scheduleOverrunGraceMinutes * 60_000).toISOString())
+      }
+      changed.schedule = true
+    }
+    if (candidateId !== undefined) {
+      const normalized = normalizeExternalId(candidateId, 'invalid_candidate_id')
+      updates.push('candidate_id = ?', 'livekit_room_name = ?')
+      values.push(normalized, livekitRoomNameFor(roomId, normalized))
+      changed.candidateId = true
+    }
+    if (recruiterId !== undefined) {
+      updates.push('recruiter_id = ?')
+      values.push(normalizeExternalId(recruiterId, 'invalid_recruiter_id'))
+      changed.recruiterId = true
+    }
+    if (maxParticipants !== undefined) {
+      updates.push('max_participants = ?')
+      values.push(clampMaxParticipants(maxParticipants))
+      changed.maxParticipants = true
+    }
+    if (updates.length) {
+      values.push(roomId)
+      db.prepare(`update rooms set ${updates.join(', ')} where id = ?`).run(...values)
+    }
+    if (invitees !== undefined) {
+      replaceRoomInvitees(roomId, normalizeInvitees(invitees), ts)
+      changed.invitees = true
+    }
+    if (Object.keys(changed).length) {
+      recordAuditEvent({
+        actorType,
+        actorId,
+        action: 'room.interview_config_updated',
+        resourceType: 'room',
+        resourceId: roomId,
+        roomId,
+        ip,
+        userAgent,
+        metadata: changed,
+      })
+    }
+    return adminRoomView(getRoom(room.id))
+  })
+}
+
+export function issueAccessToken({ roomId, role, admissionStatus = 'admitted', email = null, displayName = null }) {
   const token = randomBytes(32).toString('base64url')
   const participantId = randomId(10)
   const issuedAt = nowIso()
   const expiresAt = futureIso(15 * 60 * 1000)
   db.prepare(`
-    insert into room_access_tokens (token_hash, room_id, participant_id, role, issued_at, expires_at, admission_status)
-    values (?, ?, ?, ?, ?, ?, ?)
-  `).run(tokenHash(token), roomId, participantId, role, issuedAt, expiresAt, admissionStatus)
-  return { accessToken: token, participantId, role, expiresAt, admissionStatus }
+    insert into room_access_tokens (token_hash, room_id, participant_id, role, issued_at, expires_at, admission_status, email, display_name)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(tokenHash(token), roomId, participantId, role, issuedAt, expiresAt, admissionStatus, email, displayName)
+  return { accessToken: token, participantId, role, expiresAt, admissionStatus, email, displayName }
 }
 
-export function validatePasswordAndIssueAccess({ roomId, password, ip, activeCount }) {
+export function validatePasswordAndIssueAccess({ roomId, password, email, displayName, ip, activeCount }) {
   const room = getRoom(roomId)
   assertRoomJoinable(room)
   if (activeCount >= room.max_participants) {
-    const error = new Error('This room already has two participants.')
+    const error = new Error('This room is already full.')
     error.code = 'room_full'
     error.status = 409
     throw error
@@ -2418,8 +3088,13 @@ export function validatePasswordAndIssueAccess({ roomId, password, ip, activeCou
     throw error
   }
   clearPasswordFailures(roomId, ip)
+  // Invitee-only rooms additionally require an allowlisted email. Checked after
+  // the password so the response never leaks which addresses are invited.
+  const invitee = roomHasInvitees(room.id) ? requireInvitee(room.id, email, ip) : null
+  const participantEmail = invitee ? invitee.email : normalizeInviteeEmail(email) || null
+  const participantName = String(displayName || '').trim().slice(0, 120) || invitee?.displayName || null
   const admissionStatus = room.waiting_room_enabled && !room.auto_admit_first_guest ? 'waiting' : 'admitted'
-  const access = issueAccessToken({ roomId, role: 'guest', admissionStatus })
+  const access = issueAccessToken({ roomId, role: 'guest', admissionStatus, email: participantEmail, displayName: participantName })
   if (admissionStatus === 'waiting') {
     recordAuditEvent({
       actorType: 'participant',
@@ -2436,6 +3111,37 @@ export function validatePasswordAndIssueAccess({ roomId, password, ip, activeCou
     access,
     waiting: admissionStatus === 'waiting',
   }
+}
+
+// Auto-admission for a verified portal token holder. The signature already
+// proves portal authentication, so no password/allowlist applies; recruiters
+// (matching the room's recruiter_id) count as hosts and bypass the join window.
+export function issuePortalAccess({ room, identity, name, ip, activeCount }) {
+  const isRecruiter = Boolean(room.recruiter_id && identity === room.recruiter_id)
+  assertRoomJoinable(room, { bypassJoinWindow: isRecruiter })
+  if (activeCount >= room.max_participants) {
+    const error = new Error('This room is already full.')
+    error.code = 'room_full'
+    error.status = 409
+    throw error
+  }
+  const access = issueAccessToken({
+    roomId: room.id,
+    role: isRecruiter ? 'host' : 'guest',
+    admissionStatus: 'admitted',
+    displayName: name || null,
+  })
+  recordAuditEvent({
+    actorType: 'participant',
+    actorId: access.participantId,
+    action: 'room.portal_access_granted',
+    resourceType: 'room_access_token',
+    resourceId: access.participantId,
+    roomId: room.id,
+    ip,
+    metadata: { portalIdentity: identity, role: access.role },
+  })
+  return access
 }
 
 export function authenticateAccess({ roomId, participantId, accessToken }) {
@@ -2575,8 +3281,8 @@ export function endRoomForAll({ roomId, actorType, actorId, ip, userAgent, reaso
   })
 }
 
-export function adminCreateRoom({ displayName, password, origin, metadata, actorId, ip, userAgent }) {
-  const result = createRoom({ displayName, password, origin, metadata, actorType: 'admin', actorId })
+export function adminCreateRoom({ displayName, password, origin, metadata, schedule, invitees, candidateId, recruiterId, maxParticipants, actorId, ip, userAgent }) {
+  const result = createRoom({ displayName, password, origin, metadata, schedule, invitees, candidateId, recruiterId, maxParticipants, actorType: 'admin', actorId })
   recordAuditEvent({
     actorType: 'admin',
     actorId,
@@ -2728,8 +3434,8 @@ function recordLocalWebhookAttempt({ systemKey, eventType, roomId, payload }) {
 
 export function createIntegrationClient({ name, systemKey, permissionScope = [], allowedOrigins = [], actorId, ip, userAgent }) {
   const normalizedSystemKey = normalizeKey(systemKey || name || 'local_integration', 'invalid_system_key')
-  const allowed = new Set(['rooms:create', 'rooms:link', 'webhooks:local_record'])
-  const scope = normalizeScope(permissionScope.length ? permissionScope : ['rooms:create', 'rooms:link'], allowed)
+  const allowed = new Set(['rooms:create', 'rooms:read', 'rooms:link', 'webhooks:local_record'])
+  const scope = normalizeScope(permissionScope.length ? permissionScope : ['rooms:create', 'rooms:read', 'rooms:link'], allowed)
   if (!scope.length) {
     const error = new Error('Integration client requires at least one supported scope.')
     error.code = 'invalid_integration_scope'
@@ -2881,7 +3587,7 @@ export function requireIntegrationScope(client, scope) {
   }
 }
 
-export function integrationCreateRoom({ client, displayName, password, metadata, externalLink, externalIdentity, origin, ip, userAgent }) {
+export function integrationCreateRoom({ client, displayName, password, metadata, schedule, invitees, candidateId, recruiterId, maxParticipants, externalLink, externalIdentity, origin, ip, userAgent }) {
   requireIntegrationScope(client, 'rooms:create')
   const hasExternalLink = externalLink && typeof externalLink === 'object' && Object.keys(externalLink).length > 0
   if (hasExternalLink) requireIntegrationScope(client, 'rooms:link')
@@ -2903,6 +3609,11 @@ export function integrationCreateRoom({ client, displayName, password, metadata,
       displayName,
       password,
       metadata,
+      schedule,
+      invitees,
+      candidateId,
+      recruiterId,
+      maxParticipants,
       origin,
       actorType: 'integration',
       actorId: client.id,
@@ -2944,6 +3655,35 @@ export function integrationCreateRoom({ client, displayName, password, metadata,
       webhook,
     }
   })
+}
+
+// Read-only room status for integration clients (the portal polls this).
+// Excludes credentials and storage keys; artifacts are summarized by status.
+export function integrationRoomStatus({ roomId }) {
+  const room = requireRoom(roomId)
+  const recordings = db.prepare(`
+    select id, status, duration_ms as durationMs, finalized_at as finalizedAt
+    from recording_artifacts
+    where room_id = ? and deleted_at is null
+    order by created_at desc
+    limit 10
+  `).all(roomId)
+  const transcripts = db.prepare(`
+    select id, status, language, finalized_at as finalizedAt
+    from transcript_artifacts
+    where room_id = ? and deleted_at is null
+    order by created_at desc
+    limit 10
+  `).all(roomId)
+  return {
+    room: publicRoomView(room),
+    candidateId: room.candidate_id,
+    recruiterId: room.recruiter_id,
+    livekitRoomName: room.livekit_room_name,
+    activeParticipants: connectedParticipantCount(roomId),
+    recordings,
+    transcripts,
+  }
 }
 
 export function updateRoomPolicy({ roomId, actorId, ip, userAgent, patch = {} }) {
@@ -3157,6 +3897,7 @@ export function resetForTests() {
     delete from external_systems;
     delete from integration_clients;
     delete from room_metadata;
+    delete from room_invitees;
     delete from room_presence;
     delete from room_access_tokens;
     delete from rooms;

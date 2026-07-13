@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import WebSocket from 'ws'
 
 process.env.WEBRTC_NO_LISTEN = '1'
 process.env.WEBRTC_TRUST_PROXY = '1'
@@ -201,9 +200,9 @@ test('audits global audit log reads with bounded metadata', async () => {
   })
 })
 
-test('isolates participant tokens from admin APIs and admin sessions from signaling', async () => {
+test('isolates participant tokens from admin APIs and admin sessions from media credentials', async () => {
   resetForTests()
-  await withServer(async (base, port) => {
+  await withServer(async (base) => {
     const room = createRoom({ displayName: 'Isolation room', password: 'room-pass-0086', origin: base })
     const guest = validatePasswordAndIssueAccess({
       roomId: room.room.id,
@@ -225,20 +224,15 @@ test('isolates participant tokens from admin APIs and admin sessions from signal
     })
     assert.equal(integrationLikeAdmin.response.status, 401)
 
+    // Admin cookies never mint media credentials: the LiveKit token endpoint
+    // only accepts participant access headers.
     const admin = await bootstrapAndSetup(base)
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/signaling`, {
+    const adminMediaToken = await jsonFetch(`${base}/api/rooms/${room.room.id}/livekit-token`, {
+      method: 'POST',
       headers: { cookie: admin.cookie },
     })
-    const messages = []
-    await new Promise((resolve, reject) => {
-      ws.on('open', () => {
-        ws.send(JSON.stringify({ type: 'auth', roomId: room.room.id, participantId: admin.user.id }))
-      })
-      ws.on('message', (message) => messages.push(JSON.parse(message.toString())))
-      ws.on('close', resolve)
-      ws.on('error', reject)
-    })
-    assert.equal(messages.some((message) => message.type === 'error' && message.code === 'invalid_access'), true)
+    assert.equal(adminMediaToken.response.status, 401)
+    assert.equal(adminMediaToken.body.error, 'invalid_access')
   })
 })
 

@@ -1,0 +1,21 @@
+# Local development LiveKit config. Two keypairs:
+#   webrtc-app    — this app's control plane (token issuance, egress, webhooks)
+#   hireportal    — HirePortal's existing browser-minted tokens (portal joins
+#                   connect directly with config-only changes on the portal side)
+# Replace both secrets before any non-local deployment.
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+redis:
+  address: redis:6379
+keys:
+  webrtc-app: local-dev-secret-change-me-0088
+  hireportal: local-dev-portal-secret-0088
+webhook:
+  api_key: webrtc-app
+  urls:
+    # The app's webhook ingest (host.docker.internal reaches the host API).
+    - http://host.docker.internal:4321/api/livekit/webhooks

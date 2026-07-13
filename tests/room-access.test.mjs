@@ -38,12 +38,12 @@ test('returns not found for missing room access', () => {
   assert.throws(() => getPublicRoom('missing-room'), /Room not found/)
 })
 
-test('rejects access when active occupancy is already two', () => {
+test('rejects access when active occupancy is at the room cap', () => {
   resetForTests()
   const created = createRoom({ displayName: 'Full room', password: 'pass-1234', origin: 'http://localhost:5180' })
 
   assert.throws(
     () => validatePasswordAndIssueAccess({ roomId: created.room.id, password: 'pass-1234', ip: 'test', activeCount: 2 }),
-    /already has two participants/,
+    /already full/,
   )
 })
